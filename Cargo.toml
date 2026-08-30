@@ -9,6 +9,11 @@ members = [
     "crates/kern-execution-nav2",
 ]
 
+# The ROS 2 bridge links against a sourced ROS installation through `r2r`, so it
+# cannot build on a machine without ROS. Excluded so the workspace gates stay
+# runnable everywhere; it is built from its own directory under ROS.
+exclude = ["adapters/nav2-bridge"]
+
 [workspace.package]
 edition = "2021"
 rust-version = "1.81"

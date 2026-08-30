@@ -1,0 +1,33 @@
+# Full simulation environment for the Phase 6 acceptance test:
+# ROS 2 Jazzy + Gazebo Harmonic + Nav2 + ros_gz, with software rendering so the
+# lidar works on a machine with no GPU.
+FROM ros:jazzy-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      curl lsb-release gnupg ca-certificates \
+    && curl -sSL https://packages.osrfoundation.org/gazebo.gpg \
+         -o /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] http://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" \
+         > /etc/apt/sources.list.d/gazebo-stable.list \
+    && apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends \
+      ros-jazzy-navigation2 ros-jazzy-nav2-bringup \
+      ros-jazzy-ros-gz ros-jazzy-ros-gz-bridge ros-jazzy-ros-gz-sim \
+      ros-jazzy-robot-state-publisher ros-jazzy-tf2-tools ros-jazzy-tf2-ros \
+      python3-colcon-common-extensions \
+      clang libclang-dev build-essential pkg-config \
+      libgl1-mesa-dri libegl1 libglx-mesa0 libopengl0 mesa-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+
+# Software rendering: no GPU in the container, and the lidar needs a render
+# engine regardless.
+ENV PATH=/root/.cargo/bin:$PATH \
+    CARGO_TARGET_DIR=/tmp/target \
+    LIBGL_ALWAYS_SOFTWARE=1 \
+    GALLIUM_DRIVER=llvmpipe \
+    QT_QPA_PLATFORM=offscreen \
+    RMW_IMPLEMENTATION=rmw_fastrtps_cpp
