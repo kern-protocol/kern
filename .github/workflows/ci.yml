@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  core:
+    name: core workspace (no ROS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Print toolchain
+        run: |
+          cargo --version
+          rustc --version
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all-features --verbose
+
+      # The no_std split must stay green: core, policy, and enforcer build
+      # without std for constrained edge targets.
+      - name: cargo build --no-default-features
+        run: cargo build --no-default-features --verbose
+
+      - name: cargo build --release
+        run: cargo build --release --verbose
