@@ -33,6 +33,8 @@ use crate::lease::{
     EnforcerSessionId, IssuerId, KeyId, LeaseBody, LeaseBodyV2, LeaseId, Nonce, ProtocolVersion,
     Signature, SignedLease, SignedLeaseV2,
 };
+use crate::proposal::ParamValue;
+use crate::schema::NormalizedActionProposal;
 
 /// Domain separator for version 1 signing input.
 pub const LEASE_DOMAIN_V1: &[u8] = b"KERN-LEASE-V1";
@@ -601,4 +603,79 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedLease<'_>, DecodeError> {
         body_bytes,
         signature: Signature::from_bytes(signature),
     })
+}
+
+// -- operation bytes ----------------------------------------------------------
+
+/// The V1 encoding of a concrete parameter argument. Protocol-frozen.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireParamValue {
+    /// A numeric argument in the capability's own fixed-point units.
+    Scalar(i64),
+    /// An opaque symbolic argument.
+    Symbol(String),
+}
+
+/// The V1 encoding of a normalized operation. Protocol-frozen.
+///
+/// Parameters are emitted in ascending name order, which is exactly
+/// [`alloc::collections::BTreeMap`] iteration order, so one normalized operation
+/// has exactly one encoding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireOperationV1 {
+    /// The subject that proposed the operation.
+    pub actor: String,
+    /// The target device.
+    pub device: String,
+    /// The requested capability.
+    pub capability: String,
+    /// The validated arguments, ascending by name, unique.
+    pub params: Vec<(String, WireParamValue)>,
+}
+
+impl From<&ParamValue> for WireParamValue {
+    fn from(value: &ParamValue) -> Self {
+        match value {
+            ParamValue::Scalar(scalar) => Self::Scalar(*scalar),
+            ParamValue::Symbol(symbol) => Self::Symbol(symbol.as_str().to_string()),
+        }
+    }
+}
+
+impl From<&NormalizedActionProposal> for WireOperationV1 {
+    fn from(operation: &NormalizedActionProposal) -> Self {
+        Self {
+            actor: operation.actor().as_str().to_string(),
+            device: operation.device().as_str().to_string(),
+            capability: operation.capability().as_str().to_string(),
+            params: operation
+                .params()
+                .iter()
+                .map(|(name, value)| (name.as_str().to_string(), value.into()))
+                .collect(),
+        }
+    }
+}
+
+/// Encodes a normalized operation into its canonical V1 bytes.
+///
+/// # What this is for
+///
+/// Identity, not authority. These bytes are the preimage a caller digests to
+/// name *which* operation an authority decision covered. Nothing signs them,
+/// nothing verifies them, and possessing them permits nothing.
+///
+/// There is deliberately **no decoder**. A decoder would imply that an operation
+/// encoding is something a receiver parses and acts on, which would make this a
+/// second command channel beside the authority path. It is not one.
+///
+/// Canonical for the same reason the lease body is: one operation must have one
+/// encoding, or a digest over it would not name it.
+pub fn encode_operation(operation: &NormalizedActionProposal) -> Result<Vec<u8>, EncodeError> {
+    let wire = WireOperationV1::from(operation);
+    let bytes = postcard::to_allocvec(&wire).map_err(|_| EncodeError::Serialization)?;
+    if bytes.len() as u64 > MAX_BODY_BYTES as u64 {
+        return Err(EncodeError::BodyTooLarge);
+    }
+    Ok(bytes)
 }
