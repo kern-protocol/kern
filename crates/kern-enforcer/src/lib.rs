@@ -31,7 +31,9 @@ pub mod trust;
 pub mod verify;
 
 pub use challenge::{ChallengeRecord, ChallengeSource, ChallengeState};
-pub use error::{ConfigError, EnforcementError, EntropyError, InstallError, MintError};
+pub use error::{
+    AuthorityStatusError, ConfigError, EnforcementError, EntropyError, InstallError, MintError,
+};
 pub use store::{EnforcerStore, Installed, InstalledLease, LeaseHandle, SlotKey};
 pub use trust::{AuthorizeError, TrustError, TrustStore};
 pub use verify::{verify_bytes, verify_parsed, VerifiedLease};

@@ -11,7 +11,7 @@ use kern_core::{
 };
 
 use crate::challenge::{ChallengeRecord, ChallengeSource, ChallengeState};
-use crate::error::{ConfigError, EnforcementError, InstallError, MintError};
+use crate::error::{AuthorityStatusError, ConfigError, EnforcementError, InstallError, MintError};
 use crate::trust::TrustStore;
 use crate::verify::verify_bytes;
 
@@ -475,34 +475,68 @@ impl<M: MonotonicClock, R: ChallengeSource> EnforcerStore<M, R> {
         })
     }
 
-    /// Decides whether an operation is authorized under installed authority.
+    /// Resolves a handle to authority that is still current.
     ///
-    /// Comparisons only — no signature verification, no decoding, no allocation.
-    /// One expensive verification happens per lease at installation; this runs
-    /// per physical command.
-    pub fn enforce(
-        &self,
-        handle: &LeaseHandle,
-        operation: &NormalizedActionProposal,
-    ) -> Result<(), EnforcementError> {
-        let now = self.now().ok_or(EnforcementError::ClockWentBackwards)?;
+    /// The single definition of "this authority is still live": slot occupancy,
+    /// generation identity, deadline, and clock trust, in that order. Both the
+    /// liveness path and the authorization path go through here, so the two
+    /// cannot drift into disagreeing about what current authority means.
+    fn live_entry(&self, handle: &LeaseHandle) -> Result<&SlotEntry, AuthorityStatusError> {
+        let now = self.now().ok_or(AuthorityStatusError::ClockWentBackwards)?;
 
         let entry = self
             .slot_table
             .iter()
             .flatten()
             .find(|entry| entry.key == handle.slot)
-            .ok_or(EnforcementError::NoAuthority)?;
+            .ok_or(AuthorityStatusError::AuthorityMissing)?;
 
         // Storage position is not identity. A superseded lease, or a slot
         // reclaimed for unrelated authority, fails here.
         if entry.lease.body.core.id != handle.lease_id || entry.lease.artifact != handle.artifact {
-            return Err(EnforcementError::Superseded);
+            return Err(AuthorityStatusError::Superseded);
         }
 
         if now >= entry.lease.deadline {
-            return Err(EnforcementError::DeadlineExpired);
+            return Err(AuthorityStatusError::DeadlineExpired);
         }
+
+        Ok(entry)
+    }
+
+    /// Reports whether the authority a receipt names is still current.
+    ///
+    /// Lifetime and supersession only — the same generation still installed, the
+    /// deadline not yet passed, the clock still trustworthy. It evaluates **no**
+    /// operation: no subject, device, capability, parameter, or constraint is
+    /// examined, and no caller may read `Ok(())` as permission to do anything.
+    ///
+    /// This exists so a long-running operation's governing authority can be
+    /// re-checked without retaining the proposal that was authorized. Deciding
+    /// whether an operation is authorized remains [`Self::enforce`].
+    ///
+    /// Comparisons only. Nothing is borrowed out, so no caller learns the
+    /// deadline, the remaining lifetime, or anything else about the slot.
+    pub fn check_authority(&self, handle: &LeaseHandle) -> Result<(), AuthorityStatusError> {
+        self.live_entry(handle).map(|_| ())
+    }
+
+    /// Decides whether an operation is authorized under installed authority.
+    ///
+    /// Comparisons only — no signature verification, no decoding, no allocation.
+    /// One expensive verification happens per lease at installation; this runs
+    /// per physical command.
+    ///
+    /// Liveness is checked first, by exactly the resolution
+    /// [`Self::check_authority`] uses, so `enforce` returning `Ok` implies
+    /// `check_authority` would too. Authorization is a strict refinement of
+    /// liveness, never a separate opinion about it.
+    pub fn enforce(
+        &self,
+        handle: &LeaseHandle,
+        operation: &NormalizedActionProposal,
+    ) -> Result<(), EnforcementError> {
+        let entry = self.live_entry(handle)?;
 
         let body = &entry.lease.body.core;
         if &body.subject != operation.actor() {
