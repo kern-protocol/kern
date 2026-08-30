@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kern-core",
+    "crates/kern-policy",
+    "crates/kern-authority",
+    "crates/kern-enforcer",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.81"

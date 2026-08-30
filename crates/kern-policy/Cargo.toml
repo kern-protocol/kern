@@ -1,0 +1,16 @@
+[package]
+name = "kern-policy"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kern-core = { path = "../kern-core", default-features = false }
+
+[features]
+default = ["std"]
+std = ["kern-core/std"]
+
+[dev-dependencies]
+proptest = "1"

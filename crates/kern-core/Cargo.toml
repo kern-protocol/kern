@@ -1,0 +1,18 @@
+[package]
+name = "kern-core"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false }
+
+[features]
+default = ["std"]
+std = ["serde/std", "postcard/use-std", "sha2/std"]
+
+[dev-dependencies]
+proptest = "1"
