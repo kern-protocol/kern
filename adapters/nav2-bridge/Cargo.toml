@@ -1,0 +1,30 @@
+# Its own workspace root: this crate is never built by the Kern workspace.
+[workspace]
+
+[package]
+name = "kern-nav2-bridge"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.81"
+license = "Apache-2.0"
+
+# Deliberately NOT a member of the Kern workspace. `r2r` generates bindings from
+# a sourced ROS 2 installation at build time, so this crate cannot build on a
+# machine without ROS. Keeping it out means the workspace gates stay runnable
+# everywhere and no ROS dependency can drift into kern-execution.
+
+[dependencies]
+kern-core = { path = "../../crates/kern-core" }
+kern-execution = { path = "../../crates/kern-execution" }
+kern-execution-nav2 = { path = "../../crates/kern-execution-nav2", default-features = false }
+kern-enforcer = { path = "../../crates/kern-enforcer" }
+kern-authority = { path = "../../crates/kern-authority" }
+kern-policy = { path = "../../crates/kern-policy" }
+r2r = "0.9"
+futures = "0.3"
+getrandom = "0.2"
+
+[[bin]]
+name = "kern-nav2-demo"
+path = "src/main.rs"
