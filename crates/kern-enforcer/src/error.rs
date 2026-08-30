@@ -202,6 +202,57 @@ impl fmt::Display for InstallError {
 
 impl core::error::Error for InstallError {}
 
+/// Installed authority is no longer current for a handle.
+///
+/// Lifetime and supersession only. Nothing here says anything about a proposed
+/// operation: no subject, device, capability, parameter, or constraint is
+/// examined on this path. `Ok(())` from
+/// [`EnforcerStore::check_authority`](crate::EnforcerStore::check_authority)
+/// means the named authority is still installed and still inside its deadline,
+/// never that some operation is permitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthorityStatusError {
+    /// Nothing is installed for the handle's slot.
+    AuthorityMissing,
+    /// The slot holds different authority than the handle names.
+    ///
+    /// The handle is stale: its lease was superseded, or its storage was
+    /// reclaimed for unrelated authority.
+    Superseded,
+    /// The authority deadline has passed.
+    DeadlineExpired,
+    /// The monotonic clock moved backwards.
+    ClockWentBackwards,
+}
+
+impl fmt::Display for AuthorityStatusError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AuthorityMissing => f.write_str("no authority installed for this slot"),
+            Self::Superseded => f.write_str("handle names authority that is no longer installed"),
+            Self::DeadlineExpired => f.write_str("authority deadline passed"),
+            Self::ClockWentBackwards => f.write_str("monotonic clock moved backwards"),
+        }
+    }
+}
+
+impl core::error::Error for AuthorityStatusError {}
+
+impl From<AuthorityStatusError> for EnforcementError {
+    /// Widens a liveness failure into the hot-path failure vocabulary.
+    ///
+    /// The Phase 4 variant names are kept exactly as they were, so this mapping
+    /// is the only place the two spellings of "nothing is installed" meet.
+    fn from(error: AuthorityStatusError) -> Self {
+        match error {
+            AuthorityStatusError::AuthorityMissing => Self::NoAuthority,
+            AuthorityStatusError::Superseded => Self::Superseded,
+            AuthorityStatusError::DeadlineExpired => Self::DeadlineExpired,
+            AuthorityStatusError::ClockWentBackwards => Self::ClockWentBackwards,
+        }
+    }
+}
+
 /// An operation was refused at the hot path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnforcementError {
