@@ -1,0 +1,29 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Global Options:
+    Fixed Frame: map
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/Map
+      Name: Map
+      Topic:
+        Value: /map
+      Enabled: true
+    - Class: rviz_default_plugins/LaserScan
+      Name: LaserScan
+      Topic:
+        Value: /scan
+      Enabled: true
+    - Class: rviz_default_plugins/Path
+      Name: Plan
+      Topic:
+        Value: /plan
+      Enabled: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+  Value: true
