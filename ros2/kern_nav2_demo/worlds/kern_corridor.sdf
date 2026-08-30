@@ -1,0 +1,160 @@
+<?xml version="1.0" ?>
+<!--
+  Kern Phase 6 demonstration world, Gazebo Harmonic.
+
+  20 m x 10 m, with a 3 m corridor along y in [-1.5, +1.5] and two static obstacles
+  inside it. Geometry matches maps/kern_corridor.pgm exactly: the map's
+  lower-left corner is world (-10, -5) at 0.05 m/px.
+
+  The robot starts at (-8, 0) and the demo drives it to (+6, 0), roughly 14 m.
+  At the authorized 0.3 m/s that is around 45 seconds of motion, which is what
+  makes a six-second lease expire while the robot is still moving.
+-->
+<sdf version="1.10">
+  <world name="kern_corridor">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Perimeter. Each wall is 0.2 m thick and 1 m tall. -->
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -4.9 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>20 0.2 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>20 0.2 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 4.9 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>20 0.2 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>20 0.2 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-9.9 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.2 10 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.2 10 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_east">
+      <static>true</static>
+      <pose>9.9 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.2 10 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.2 10 1</size></box></geometry></visual>
+      </link>
+    </model>
+
+    <!-- Corridor walls: a 3 m lane along y in [-1.5, +1.5], matching maps/generate_map.py. -->
+    <model name="corridor_south_west">
+      <static>true</static>
+      <pose>-5.9 -3.2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.2 3.4 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.2 3.4 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="corridor_north_west">
+      <static>true</static>
+      <pose>-5.9 3.2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.2 3.4 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.2 3.4 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="corridor_south_east">
+      <static>true</static>
+      <pose>2.1 -3.2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.2 3.4 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.2 3.4 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="corridor_north_east">
+      <static>true</static>
+      <pose>2.1 3.2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.2 3.4 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.2 3.4 1</size></box></geometry></visual>
+      </link>
+    </model>
+
+    <!-- Two static obstacles inside the lane. -->
+    <model name="obstacle_a">
+      <static>true</static>
+      <pose>-2.7 -0.5 0.3 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.6 0.6 0.6</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.6 0.6 0.6</size></box></geometry>
+          <material><ambient>0.7 0.3 0.1 1</ambient><diffuse>0.7 0.3 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="obstacle_b">
+      <static>true</static>
+      <pose>-0.2 0.5 0.3 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.6 0.6 0.6</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.6 0.6 0.6</size></box></geometry>
+          <material><ambient>0.7 0.3 0.1 1</ambient><diffuse>0.7 0.3 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- The destination the demo navigates to. Visual only. -->
+    <model name="goal_marker">
+      <static>true</static>
+      <pose>6 0 0.01 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><cylinder><radius>0.4</radius><length>0.02</length></cylinder></geometry>
+          <material><ambient>0.1 0.6 0.2 1</ambient><diffuse>0.1 0.6 0.2 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <include>
+      <uri>model://kern_bot</uri>
+      <pose>-8 0 0.1 0 0 0</pose>
+    </include>
+  </world>
+</sdf>
