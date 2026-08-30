@@ -6,6 +6,7 @@ members = [
     "crates/kern-authority",
     "crates/kern-enforcer",
     "crates/kern-execution",
+    "crates/kern-execution-nav2",
 ]
 
 [workspace.package]
