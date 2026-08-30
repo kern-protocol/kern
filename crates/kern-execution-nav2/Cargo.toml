@@ -1,0 +1,31 @@
+[package]
+name = "kern-execution-nav2"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# The demo shares the tests' pipeline harness, which is a module rather than a
+# target of its own.
+autoexamples = false
+
+[dependencies]
+kern-core = { path = "../kern-core", default-features = false }
+kern-execution = { path = "../kern-execution", default-features = false }
+
+[features]
+default = ["fake-backend"]
+# A deterministic, ROS-free backend. Ships in the library because the demo
+# example and the integration tests both need the same one, and because it is
+# not a security boundary: a backend decides nothing about authority.
+fake-backend = []
+
+[dev-dependencies]
+kern-authority = { path = "../kern-authority" }
+kern-enforcer = { path = "../kern-enforcer" }
+kern-policy = { path = "../kern-policy" }
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+required-features = ["fake-backend"]
