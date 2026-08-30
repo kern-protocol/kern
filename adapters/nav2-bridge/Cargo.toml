@@ -23,7 +23,7 @@ kern-authority = { path = "../../crates/kern-authority" }
 kern-policy = { path = "../../crates/kern-policy" }
 r2r = "0.9"
 futures = "0.3"
-getrandom = "0.2"
+getrandom = "0.4"
 
 [[bin]]
 name = "kern-nav2-demo"
