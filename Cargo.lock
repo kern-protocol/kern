@@ -269,6 +269,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kern-execution"
+version = "0.0.0"
+dependencies = [
+ "kern-authority",
+ "kern-core",
+ "kern-enforcer",
+ "kern-policy",
+ "sha2",
+]
+
+[[package]]
 name = "kern-policy"
 version = "0.0.0"
 dependencies = [
