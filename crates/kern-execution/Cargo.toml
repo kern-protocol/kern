@@ -1,0 +1,20 @@
+[package]
+name = "kern-execution"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kern-core = { path = "../kern-core", default-features = false }
+kern-enforcer = { path = "../kern-enforcer", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+
+[features]
+default = ["std"]
+std = ["kern-core/std", "kern-enforcer/std", "sha2/std"]
+
+[dev-dependencies]
+kern-authority = { path = "../kern-authority" }
+kern-policy = { path = "../kern-policy" }
