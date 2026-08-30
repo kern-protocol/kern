@@ -1,1 +1,31 @@
+# Rust build artifacts
 /target
+**/target
+Cargo.lock.bak
+
+# The nav2-bridge builds out-of-workspace and needs its own target dir.
+/adapters/nav2-bridge/target
+
+# Gazebo / simulation artifacts
+**/worlds/core
+*.core
+core.*
+*.qlog
+
+# Python
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+*.iml
+
+# Colcon
+install/
+build/
+log/
