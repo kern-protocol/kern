@@ -293,6 +293,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "kern-execution-arm"
+version = "0.0.0"
+dependencies = [
+ "kern-authority",
+ "kern-core",
+ "kern-enforcer",
+ "kern-execution",
+ "kern-policy",
+]
+
+[[package]]
+name = "kern-execution-conveyor"
+version = "0.0.0"
+dependencies = [
+ "kern-authority",
+ "kern-core",
+ "kern-enforcer",
+ "kern-execution",
+ "kern-policy",
+]
+
+[[package]]
 name = "kern-execution-nav2"
 version = "0.0.0"
 dependencies = [
