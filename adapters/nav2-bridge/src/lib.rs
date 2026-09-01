@@ -52,6 +52,7 @@ use kern_execution_nav2::backend::{
 use kern_execution_nav2::EventQueue;
 
 pub mod ros;
+pub mod workstation;
 
 /// How long a Kern-thread call waits for the worker before calling the result
 /// unknown.
