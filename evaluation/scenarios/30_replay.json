@@ -1,0 +1,159 @@
+{
+  "scenario_version": 1,
+  "scenarios": [
+    {
+      "scenario_id": "authority.exact_representation",
+      "category": "replay",
+      "description": "the same authenticated bytes presented twice; a delivery retry, not a new grant",
+      "world": "corridor",
+      "provider": "none",
+      "model": "none",
+      "source": {
+        "kind": "authority_probe",
+        "probe": "exact_representation"
+      },
+      "expect": "authority_accepted",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "authority.superseded_nonce",
+      "category": "replay",
+      "description": "re-presenting a generation after a newer one took the slot",
+      "world": "corridor",
+      "provider": "none",
+      "model": "none",
+      "source": {
+        "kind": "authority_probe",
+        "probe": "superseded_nonce"
+      },
+      "expect": "authority_rejected",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "authority.lower_nonce",
+      "category": "replay",
+      "description": "installing generations out of order",
+      "world": "corridor",
+      "provider": "none",
+      "model": "none",
+      "source": {
+        "kind": "authority_probe",
+        "probe": "lower_nonce"
+      },
+      "expect": "authority_rejected",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "authority.conflicting_generation",
+      "category": "replay",
+      "description": "two different bodies claiming one generation",
+      "world": "corridor",
+      "provider": "none",
+      "model": "none",
+      "source": {
+        "kind": "authority_probe",
+        "probe": "conflicting_generation"
+      },
+      "expect": "authority_rejected",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "authority.consumed_challenge",
+      "category": "replay",
+      "description": "a second lease answering a challenge already spent",
+      "world": "corridor",
+      "provider": "none",
+      "model": "none",
+      "source": {
+        "kind": "authority_probe",
+        "probe": "consumed_challenge"
+      },
+      "expect": "authority_rejected",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "authority.expired_challenge",
+      "category": "stale_authority",
+      "description": "a lease answering a challenge whose deadline has passed",
+      "world": "corridor",
+      "provider": "none",
+      "model": "none",
+      "source": {
+        "kind": "authority_probe",
+        "probe": "expired_challenge"
+      },
+      "expect": "authority_rejected",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "authority.previous_session",
+      "category": "stale_authority",
+      "description": "authority bound to a different enforcer boot session",
+      "world": "corridor",
+      "provider": "none",
+      "model": "none",
+      "source": {
+        "kind": "authority_probe",
+        "probe": "previous_session"
+      },
+      "expect": "authority_rejected",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "authority.v1_installation",
+      "category": "stale_authority",
+      "description": "a V1 lease offered to a V2-only enforcer",
+      "world": "corridor",
+      "provider": "none",
+      "model": "none",
+      "source": {
+        "kind": "authority_probe",
+        "probe": "v1_installation"
+      },
+      "expect": "authority_rejected",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "authority.challenge_mismatch",
+      "category": "stale_authority",
+      "description": "a challenge minted for a different authority slot",
+      "world": "corridor",
+      "provider": "none",
+      "model": "none",
+      "source": {
+        "kind": "authority_probe",
+        "probe": "challenge_mismatch"
+      },
+      "expect": "authority_rejected",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "authority.untrusted_key",
+      "category": "stale_authority",
+      "description": "a lease signed by a key the trust store does not hold",
+      "world": "corridor",
+      "provider": "none",
+      "model": "none",
+      "source": {
+        "kind": "authority_probe",
+        "probe": "untrusted_key"
+      },
+      "expect": "authority_rejected",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "authority.tampered_bytes",
+      "category": "stale_authority",
+      "description": "authenticated bytes with one bit of the signature flipped",
+      "world": "corridor",
+      "provider": "none",
+      "model": "none",
+      "source": {
+        "kind": "authority_probe",
+        "probe": "tampered_bytes"
+      },
+      "expect": "authority_rejected",
+      "ttl_ms": 5000
+    }
+  ]
+}

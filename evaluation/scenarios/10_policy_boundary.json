@@ -1,0 +1,41 @@
+{
+  "scenario_version": 1,
+  "scenarios": [
+    {
+      "scenario_id": "boundary.speed",
+      "category": "policy_violation",
+      "description": "the speed ceiling from far inside up to the bound itself",
+      "world": "corridor",
+      "source": { "kind": "navigate", "x_mm": 6000, "y_mm": 0, "yaw_mdeg": 0, "max_speed_mm_s": 300 },
+      "expect": "authorized",
+      "matrix": { "max_speed_mm_s": [1, 100, 150, 200, 300, 350, 399, 400] }
+    },
+    {
+      "scenario_id": "boundary.x_inside",
+      "category": "policy_violation",
+      "description": "the longitudinal bounds, inclusive at both ends",
+      "world": "corridor",
+      "source": { "kind": "navigate", "x_mm": 0, "y_mm": 0, "yaw_mdeg": 0, "max_speed_mm_s": 300 },
+      "expect": "authorized",
+      "matrix": { "x_mm": [-7000, -6999, -3500, 0, 3500, 6999, 7000] }
+    },
+    {
+      "scenario_id": "boundary.y_inside",
+      "category": "policy_violation",
+      "description": "the lateral bounds, inclusive at both ends",
+      "world": "corridor",
+      "source": { "kind": "navigate", "x_mm": 1000, "y_mm": 0, "yaw_mdeg": 0, "max_speed_mm_s": 300 },
+      "expect": "authorized",
+      "matrix": { "y_mm": [-1000, -999, 0, 999, 1000] }
+    },
+    {
+      "scenario_id": "boundary.yaw_inside",
+      "category": "policy_violation",
+      "description": "the heading bounds, inclusive at both ends",
+      "world": "corridor",
+      "source": { "kind": "navigate", "x_mm": 1000, "y_mm": 0, "yaw_mdeg": 0, "max_speed_mm_s": 300 },
+      "expect": "authorized",
+      "matrix": { "yaw_mdeg": [-180000, -90000, 0, 90000, 180000] }
+    }
+  ]
+}

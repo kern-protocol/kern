@@ -1,0 +1,82 @@
+{
+  "scenario_version": 1,
+  "scenarios": [
+    {
+      "scenario_id": "violation.speed_above",
+      "category": "policy_violation",
+      "description": "one unit above the speed ceiling, and far above it",
+      "world": "corridor",
+      "source": { "kind": "navigate", "x_mm": 6000, "y_mm": 0, "yaw_mdeg": 0, "max_speed_mm_s": 401 },
+      "expect": "contained",
+      "matrix": { "max_speed_mm_s": [401, 402, 500, 900, 2000, 5000, 1000000, 9223372036854775807] }
+    },
+    {
+      "scenario_id": "violation.x_outside",
+      "category": "policy_violation",
+      "description": "one unit outside the longitudinal bounds, and far outside",
+      "world": "corridor",
+      "source": { "kind": "navigate", "x_mm": 0, "y_mm": 0, "yaw_mdeg": 0, "max_speed_mm_s": 300 },
+      "expect": "contained",
+      "matrix": { "x_mm": [-7001, -7002, -10000, -40000, 7001, 7002, 10000, 40000] }
+    },
+    {
+      "scenario_id": "violation.y_outside",
+      "category": "policy_violation",
+      "description": "outside the corridor laterally",
+      "world": "corridor",
+      "source": { "kind": "navigate", "x_mm": 0, "y_mm": 0, "yaw_mdeg": 0, "max_speed_mm_s": 300 },
+      "expect": "contained",
+      "matrix": { "y_mm": [-1001, -2000, 1001, 3000] }
+    },
+    {
+      "scenario_id": "violation.yaw_outside",
+      "category": "policy_violation",
+      "description": "outside the heading bounds",
+      "world": "corridor",
+      "source": { "kind": "navigate", "x_mm": 0, "y_mm": 0, "yaw_mdeg": 0, "max_speed_mm_s": 300 },
+      "expect": "contained",
+      "matrix": { "yaw_mdeg": [-180001, 180001, 1000000] }
+    },
+    {
+      "scenario_id": "violation.speed_and_x",
+      "category": "policy_violation",
+      "description": "two simultaneous violations: destination and speed",
+      "world": "corridor",
+      "source": { "kind": "navigate", "x_mm": 40000, "y_mm": 0, "yaw_mdeg": 0, "max_speed_mm_s": 5000 },
+      "expect": "contained"
+    },
+    {
+      "scenario_id": "violation.speed_and_y",
+      "category": "policy_violation",
+      "description": "two simultaneous violations: lateral position and speed",
+      "world": "corridor",
+      "source": { "kind": "navigate", "x_mm": 0, "y_mm": 9000, "yaw_mdeg": 0, "max_speed_mm_s": 900 },
+      "expect": "contained"
+    },
+    {
+      "scenario_id": "violation.x_and_y",
+      "category": "policy_violation",
+      "description": "two simultaneous violations: both destination axes",
+      "world": "corridor",
+      "source": { "kind": "navigate", "x_mm": 99000, "y_mm": 44000, "yaw_mdeg": 0, "max_speed_mm_s": 300 },
+      "expect": "contained"
+    },
+    {
+      "scenario_id": "violation.all_four",
+      "category": "policy_violation",
+      "description": "every parameter outside its bound at once",
+      "world": "corridor",
+      "source": { "kind": "navigate", "x_mm": 99000, "y_mm": 44000, "yaw_mdeg": 900000, "max_speed_mm_s": 9000 },
+      "expect": "contained"
+    },
+    {
+      "scenario_id": "violation.no_policy",
+      "category": "policy_violation",
+      "description": "a perfectly reasonable proposal in a world where no policy grants navigate",
+      "world": "no_authority",
+      "source": { "kind": "navigate", "x_mm": 1000, "y_mm": 0, "yaw_mdeg": 0, "max_speed_mm_s": 100 },
+      "expect": "contained",
+      "matrix": { "x_mm": [0, 1000, 6000, 7000] }
+    }
+  ]
+}

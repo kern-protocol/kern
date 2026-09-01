@@ -1,0 +1,333 @@
+{
+  "scenario_version": 1,
+  "scenarios": [
+    {
+      "scenario_id": "execution.baseline_completed",
+      "category": "baseline",
+      "description": "an undisturbed authorized navigation, run to completion",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "none"
+      },
+      "expect": "authorized",
+      "ttl_ms": 20000
+    },
+    {
+      "scenario_id": "execution.expire_before_submit",
+      "category": "lease_expiry",
+      "description": "authority expires between prepare and submit: a successful prepare is not a reservation",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "expire_before_submit"
+      },
+      "expect": "observed",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "execution.supersede_before_submit",
+      "category": "supersession",
+      "description": "authority is superseded between prepare and submit",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "supersede_before_submit"
+      },
+      "expect": "observed",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "execution.expire_while_running",
+      "category": "lease_expiry",
+      "description": "the lease expires while the operation is running, and the executor confirms the cancellation",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "expire_while_running",
+        "at_ms": 100,
+        "cancel": "accepted_then_confirmed"
+      },
+      "expect": "observed",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "execution.expire_latency_sweep",
+      "category": "lease_expiry",
+      "description": "how late the first tick after the deadline observes the lapse",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "expire_while_running",
+        "at_ms": 1,
+        "cancel": "accepted_then_confirmed"
+      },
+      "expect": "observed",
+      "ttl_ms": 5000,
+      "matrix": {
+        "at_ms": [
+          1,
+          5,
+          10,
+          50,
+          100,
+          500
+        ]
+      }
+    },
+    {
+      "scenario_id": "cancel.accepted_never_confirmed",
+      "category": "cancellation_uncertainty",
+      "description": "the adapter takes the cancellation request and the executor never reports a result",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "expire_while_running",
+        "at_ms": 50,
+        "cancel": "accepted_never_confirmed"
+      },
+      "expect": "observed",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "cancel.rejected",
+      "category": "cancellation_uncertainty",
+      "description": "the action server refuses the cancellation request",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "expire_while_running",
+        "at_ms": 50,
+        "cancel": "rejected"
+      },
+      "expect": "observed",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "cancel.already_terminal",
+      "category": "cancellation_uncertainty",
+      "description": "the goal had already ended when the cancellation was requested",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "expire_while_running",
+        "at_ms": 50,
+        "cancel": "already_terminal"
+      },
+      "expect": "observed",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "cancel.unknown",
+      "category": "cancellation_uncertainty",
+      "description": "the cancellation request may or may not have arrived",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "expire_while_running",
+        "at_ms": 50,
+        "cancel": "unknown"
+      },
+      "expect": "observed",
+      "ttl_ms": 5000
+    },
+    {
+      "scenario_id": "supersede.while_running_confirmed",
+      "category": "supersession",
+      "description": "a newer lease takes the slot while the operation is running; the executor confirms",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "supersede_while_running",
+        "at_ms": 500,
+        "cancel": "accepted_then_confirmed"
+      },
+      "expect": "observed",
+      "ttl_ms": 20000
+    },
+    {
+      "scenario_id": "supersede.while_running_unconfirmed",
+      "category": "supersession",
+      "description": "a newer lease takes the slot and the executor never confirms",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "supersede_while_running",
+        "at_ms": 500,
+        "cancel": "accepted_never_confirmed"
+      },
+      "expect": "observed",
+      "ttl_ms": 20000
+    },
+    {
+      "scenario_id": "disconnect.while_running",
+      "category": "executor_disconnect",
+      "description": "the adapter loses sight of the executor while the operation is running",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "disconnect_while_running",
+        "at_ms": 500
+      },
+      "expect": "observed",
+      "ttl_ms": 20000
+    },
+    {
+      "scenario_id": "disconnect.late",
+      "category": "executor_disconnect",
+      "description": "the link is lost later in the run",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "disconnect_while_running",
+        "at_ms": 2000
+      },
+      "expect": "observed",
+      "ttl_ms": 20000
+    },
+    {
+      "scenario_id": "submission.unknown",
+      "category": "executor_disconnect",
+      "description": "the submission acknowledgement is lost, so Kern holds no operation identity",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "submission_unknown"
+      },
+      "expect": "observed",
+      "ttl_ms": 20000
+    },
+    {
+      "scenario_id": "submission.rejected",
+      "category": "executor_disconnect",
+      "description": "the executor proves the goal did not start",
+      "world": "corridor",
+      "provider": "fixture",
+      "model": "deterministic",
+      "source": {
+        "kind": "navigate",
+        "x_mm": 6000,
+        "y_mm": 0,
+        "yaw_mdeg": 0,
+        "max_speed_mm_s": 300
+      },
+      "perturbation": {
+        "kind": "submission_rejected"
+      },
+      "expect": "observed",
+      "ttl_ms": 20000
+    }
+  ]
+}

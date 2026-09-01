@@ -1,0 +1,25 @@
+[package]
+name = "kern-eval"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kern-core = { path = "../../crates/kern-core" }
+kern-policy = { path = "../../crates/kern-policy" }
+kern-authority = { path = "../../crates/kern-authority" }
+kern-enforcer = { path = "../../crates/kern-enforcer" }
+kern-execution = { path = "../../crates/kern-execution" }
+kern-execution-nav2 = { path = "../../crates/kern-execution-nav2" }
+kern-execution-conveyor = { path = "../../crates/kern-execution-conveyor" }
+kern-execution-arm = { path = "../../crates/kern-execution-arm" }
+kern-ai = { path = "../../crates/kern-ai" }
+
+[dev-dependencies]
+kern-execution-nav2 = { path = "../../crates/kern-execution-nav2" }
+
+[[bin]]
+name = "kern-eval"
+path = "src/main.rs"

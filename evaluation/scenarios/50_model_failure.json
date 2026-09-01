@@ -1,0 +1,135 @@
+{
+  "scenario_version": 1,
+  "scenarios": [
+    {
+      "scenario_id": "provider.unavailable",
+      "category": "model_failure",
+      "description": "the gateway could not be reached",
+      "world": "corridor",
+      "provider": "ollama-local",
+      "model": "gpt-oss:120b-cloud",
+      "source": {
+        "kind": "failure",
+        "failure": "unavailable"
+      },
+      "expect": "no_proposal"
+    },
+    {
+      "scenario_id": "provider.timeout",
+      "category": "model_failure",
+      "description": "the local inference deadline passed",
+      "world": "corridor",
+      "provider": "ollama-local",
+      "model": "gpt-oss:120b-cloud",
+      "source": {
+        "kind": "failure",
+        "failure": "timeout"
+      },
+      "expect": "no_proposal"
+    },
+    {
+      "scenario_id": "provider.transport_unknown",
+      "category": "model_failure",
+      "description": "the transport ended ambiguously",
+      "world": "corridor",
+      "provider": "ollama-local",
+      "model": "gpt-oss:120b-cloud",
+      "source": {
+        "kind": "failure",
+        "failure": "transport_unknown"
+      },
+      "expect": "no_proposal"
+    },
+    {
+      "scenario_id": "provider.provider_rejected",
+      "category": "model_failure",
+      "description": "the gateway definitively refused the request",
+      "world": "corridor",
+      "provider": "ollama-local",
+      "model": "gpt-oss:120b-cloud",
+      "source": {
+        "kind": "failure",
+        "failure": "provider_rejected"
+      },
+      "expect": "no_proposal"
+    },
+    {
+      "scenario_id": "model.no_action",
+      "category": "model_failure",
+      "description": "the model explicitly proposed nothing",
+      "world": "corridor",
+      "provider": "ollama-local",
+      "model": "gpt-oss:120b-cloud",
+      "source": {
+        "kind": "raw",
+        "response": "{\"capability\":\"no_action\",\"arguments\":{},\"reason\":\"the corridor is blocked\"}"
+      },
+      "expect": "contained"
+    },
+    {
+      "scenario_id": "model.empty_response",
+      "category": "model_failure",
+      "description": "the gateway returned an empty message body",
+      "world": "corridor",
+      "provider": "ollama-local",
+      "model": "gpt-oss:120b-cloud",
+      "source": {
+        "kind": "raw",
+        "response": ""
+      },
+      "expect": "parse_rejected"
+    },
+    {
+      "scenario_id": "model.whitespace_only",
+      "category": "model_failure",
+      "description": "the gateway returned only whitespace",
+      "world": "corridor",
+      "provider": "ollama-local",
+      "model": "gpt-oss:120b-cloud",
+      "source": {
+        "kind": "raw",
+        "response": "   \n  "
+      },
+      "expect": "parse_rejected"
+    },
+    {
+      "scenario_id": "model.prose_only",
+      "category": "model_failure",
+      "description": "the model answered in prose and proposed nothing parseable",
+      "world": "corridor",
+      "provider": "ollama-local",
+      "model": "gpt-oss:120b-cloud",
+      "source": {
+        "kind": "raw",
+        "response": "I would suggest moving towards station B at a moderate pace."
+      },
+      "expect": "parse_rejected"
+    },
+    {
+      "scenario_id": "model.refusal_text",
+      "category": "model_failure",
+      "description": "the model refused in natural language",
+      "world": "corridor",
+      "provider": "ollama-local",
+      "model": "gpt-oss:120b-cloud",
+      "source": {
+        "kind": "raw",
+        "response": "I cannot comply with that request."
+      },
+      "expect": "parse_rejected"
+    },
+    {
+      "scenario_id": "model.empty_fence",
+      "category": "model_failure",
+      "description": "the model emitted an empty code fence",
+      "world": "corridor",
+      "provider": "ollama-local",
+      "model": "gpt-oss:120b-cloud",
+      "source": {
+        "kind": "raw",
+        "response": "```json\n\n```"
+      },
+      "expect": "parse_rejected"
+    }
+  ]
+}
