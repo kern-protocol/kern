@@ -7,6 +7,8 @@ members = [
     "crates/kern-enforcer",
     "crates/kern-execution",
     "crates/kern-execution-nav2",
+    "crates/kern-execution-conveyor",
+    "crates/kern-execution-arm",
     "crates/kern-ai",
 ]
 

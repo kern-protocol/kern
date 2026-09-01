@@ -1,0 +1,23 @@
+[package]
+name = "kern-execution-conveyor"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kern-core = { path = "../kern-core", default-features = false }
+kern-execution = { path = "../kern-execution", default-features = false }
+
+[features]
+default = ["fake-backend"]
+# A deterministic, ROS-free backend. Ships in the library because the tests and
+# the demos need the same one, and because it is not a security boundary: a
+# backend decides nothing about authority.
+fake-backend = []
+
+[dev-dependencies]
+kern-authority = { path = "../kern-authority" }
+kern-enforcer = { path = "../kern-enforcer" }
+kern-policy = { path = "../kern-policy" }
