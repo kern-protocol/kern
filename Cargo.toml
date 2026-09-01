@@ -10,18 +10,21 @@ members = [
     "crates/kern-execution-conveyor",
     "crates/kern-execution-arm",
     "crates/kern-ai",
+    "evaluation/kern-eval",
 ]
 
-# Both adapters need something the workspace gates must never need. The ROS 2
-# bridge links against a sourced ROS installation through `r2r`, so it cannot
-# build on a machine without ROS at all. The OpenAI-compatible model adapter
-# pulls an HTTP and TLS stack that has no business in the authority build graph.
-# Keeping both out means the workspace gates stay runnable everywhere, the
-# trusted dependency set stays small, and no ordinary `cargo test` can reach a
-# network or a credential. Each is built and gated from its own directory.
+# Excluded because each needs something the workspace gates must never need. The
+# ROS 2 bridge links against a sourced ROS installation through `r2r`, so it
+# cannot build on a machine without ROS at all. The OpenAI-compatible model
+# adapter pulls an HTTP and TLS stack that has no business in the authority
+# build graph, and the live evaluator depends on that adapter. Keeping all three
+# out means the workspace gates stay runnable everywhere, the trusted dependency
+# set stays small, and no ordinary `cargo test` can reach a network, a
+# credential, or a robot. Each is built and gated from its own directory.
 exclude = [
     "adapters/nav2-bridge",
     "adapters/openai-compatible",
+    "evaluation/kern-eval-live",
 ]
 
 [workspace.package]

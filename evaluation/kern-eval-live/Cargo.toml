@@ -1,0 +1,21 @@
+[package]
+name = "kern-eval-live"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.81"
+license = "Apache-2.0"
+
+# Its own workspace root. Deliberately not a member of the Kern workspace: it
+# depends on the gateway adapter, which carries an HTTP and TLS stack, and the
+# workspace gates must never need a network.
+[workspace]
+
+[dependencies]
+kern-eval = { path = "../kern-eval" }
+kern-ai = { path = "../../crates/kern-ai" }
+kern-model-openai-compatible = { path = "../../adapters/openai-compatible" }
+
+[[bin]]
+name = "kern-eval-live"
+path = "src/main.rs"
