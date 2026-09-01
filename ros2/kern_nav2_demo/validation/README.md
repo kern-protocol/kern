@@ -24,6 +24,26 @@ docker run --rm -e SCENARIO=expiry -e TTL_MS=30000 -e RUN_FOR=100 \
   kern-sim bash /scratch/stage3_kern_e2e.sh
 ```
 
+```bash
+# 4. Phase 7: a live language model in front of the same stack.
+#    The model runs on the host; the container reaches it through
+#    host.docker.internal. Kern sees only the bytes it returns.
+docker run --rm \
+  -e KERN_MODEL_ID=gpt-oss:120b-cloud \
+  -e KERN_MODEL_BASE_URL=http://host.docker.internal:11434/v1 \
+  -e INSTRUCTION="Take the parcel to station B, gently and carefully." \
+  -e TTL_MS=120000 -e RUN_FOR=110 -e SETTLE=10 -e EXPECT=allowed \
+  --add-host=host.docker.internal:host-gateway \
+  -v "$PWD":/work -v "$PWD/ros2/kern_nav2_demo/validation":/scratch -w /work \
+  kern-sim bash /scratch/stage4_ai_e2e.sh
+```
+
+`stage4` knobs: `INSTRUCTION`, `TTL_MS`, `RUN_FOR`, `SETTLE` (seconds of ROS
+discovery time before the goal is prepared — middleware patience, not authority
+time), `EXPECT`, and the `KERN_MODEL_*` provider variables. A denied proposal
+never reaches ROS: `kern-ai-demo` evaluates policy before it creates a node, so
+`/speed_limit` and the action server see nothing at all.
+
 `stage3` knobs: `SCENARIO`, `TTL_MS`, `RUN_FOR`, `WATCH` (seconds to keep
 checking authority lifetime after the execution ends), `KILL_BT` with
 `KILL_MODE=kill|deactivate`, `PAUSE_GZ`.

@@ -1,0 +1,392 @@
+<?xml version="1.0" ?>
+<!--
+  Kern heterogeneous validation world, Gazebo Harmonic.
+
+  The Phase 6 corridor, unchanged, plus two workstations placed *outside* the
+  navigable lane so the occupancy map stays exactly as generated: the conveyor
+  at y = +3 and the arm at y = -3, both inside the corridor-wall x range where
+  maps/kern_corridor.pgm already marks the floor occupied. Nav2 therefore plans
+  the same paths it always did, and the two new machines are simply not on them.
+
+  Three machines, three semantic capabilities, three authority slots:
+
+    cafe_robot      navigate(destination_x_mm, destination_y_mm, yaw_mdeg,
+                             max_speed_mm_s)      -> Nav2, DiffDrive
+    conveyor_01     transfer_item(destination_station, max_speed_mm_s)
+                                                  -> one prismatic joint
+    robotic_arm_01  pick_and_place(source_zone, destination_zone)
+                                                  -> two revolute joints
+
+  Neither workstation exposes a motor. Each exposes exactly the joints its
+  adapter commands, and the adapter is handed poses by trusted configuration
+  rather than by anything a proposal carried.
+-->
+<sdf version="1.10">
+  <world name="kern_workspace">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Perimeter. Each wall is 0.2 m thick and 1 m tall. -->
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -4.9 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>20 0.2 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>20 0.2 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 4.9 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>20 0.2 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>20 0.2 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-9.9 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.2 10 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.2 10 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_east">
+      <static>true</static>
+      <pose>9.9 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.2 10 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.2 10 1</size></box></geometry></visual>
+      </link>
+    </model>
+
+    <!-- Corridor walls: a 3 m lane along y in [-1.5, +1.5], matching maps/generate_map.py. -->
+    <model name="corridor_south_west">
+      <static>true</static>
+      <pose>-5.9 -3.2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.2 3.4 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.2 3.4 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="corridor_north_west">
+      <static>true</static>
+      <pose>-5.9 3.2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.2 3.4 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.2 3.4 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="corridor_south_east">
+      <static>true</static>
+      <pose>2.1 -3.2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.2 3.4 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.2 3.4 1</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="corridor_north_east">
+      <static>true</static>
+      <pose>2.1 3.2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.2 3.4 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.2 3.4 1</size></box></geometry></visual>
+      </link>
+    </model>
+
+    <!-- Two static obstacles inside the lane. -->
+    <model name="obstacle_a">
+      <static>true</static>
+      <pose>-2.7 -0.5 0.3 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.6 0.6 0.6</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.6 0.6 0.6</size></box></geometry>
+          <material><ambient>0.7 0.3 0.1 1</ambient><diffuse>0.7 0.3 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="obstacle_b">
+      <static>true</static>
+      <pose>-0.2 0.5 0.3 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.6 0.6 0.6</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.6 0.6 0.6</size></box></geometry>
+          <material><ambient>0.7 0.3 0.1 1</ambient><diffuse>0.7 0.3 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- The destination the demo navigates to. Visual only. -->
+    <model name="goal_marker">
+      <static>true</static>
+      <pose>6 0 0.01 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><cylinder><radius>0.4</radius><length>0.02</length></cylinder></geometry>
+          <material><ambient>0.1 0.6 0.2 1</ambient><diffuse>0.1 0.6 0.2 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <include>
+      <uri>model://kern_bot</uri>
+      <pose>-8 0 0.1 0 0 0</pose>
+    </include>
+
+    <!-- ================= conveyor_01 =================
+      A belt with one prismatic joint. The "package" is the joint's child link,
+      so commanding the joint moves the package and the package's pose is the
+      observation. Two stations, 1.2 m apart, matching the adapter's configured
+      station positions.
+    -->
+    <model name="conveyor_01">
+      <pose>-2 3 0 0 0 0</pose>
+      <link name="frame">
+        <inertial>
+          <mass>50</mass>
+          <inertia><ixx>5</ixx><iyy>5</iyy><izz>5</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry><box><size>2.0 0.5 0.2</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>2.0 0.5 0.2</size></box></geometry>
+          <material>
+            <ambient>0.25 0.25 0.3 1</ambient>
+            <diffuse>0.3 0.3 0.35 1</diffuse>
+          </material>
+        </visual>
+        <visual name="station_a_mark">
+          <pose>-0.6 0 0.11 0 0 0</pose>
+          <geometry><box><size>0.1 0.5 0.01</size></box></geometry>
+          <material><ambient>0.1 0.6 0.1 1</ambient><diffuse>0.1 0.8 0.1 1</diffuse></material>
+        </visual>
+        <visual name="station_b_mark">
+          <pose>0.6 0 0.11 0 0 0</pose>
+          <geometry><box><size>0.1 0.5 0.01</size></box></geometry>
+          <material><ambient>0.1 0.3 0.7 1</ambient><diffuse>0.1 0.4 0.9 1</diffuse></material>
+        </visual>
+      </link>
+
+      <link name="package">
+        <pose>-0.6 0 0.25 0 0 0</pose>
+        <inertial>
+          <mass>1.0</mass>
+          <inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry><box><size>0.2 0.2 0.2</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.2 0.2 0.2</size></box></geometry>
+          <material><ambient>0.7 0.4 0.1 1</ambient><diffuse>0.9 0.5 0.1 1</diffuse></material>
+        </visual>
+      </link>
+
+      <!-- The only degree of freedom the machine has. Its limits are the belt;
+           the adapter never commands outside them, and the joint could not
+           honour it if it tried. -->
+      <joint name="belt" type="prismatic">
+        <parent>frame</parent>
+        <child>package</child>
+        <axis>
+          <xyz>1 0 0</xyz>
+          <limit><lower>0.0</lower><upper>1.2</upper><effort>200</effort><velocity>1.0</velocity></limit>
+          <dynamics><damping>5.0</damping></dynamics>
+        </axis>
+      </joint>
+
+      <plugin filename="gz-sim-joint-position-controller-system"
+              name="gz::sim::systems::JointPositionController">
+        <joint_name>belt</joint_name>
+        <topic>/conveyor_01/belt_cmd</topic>
+        <p_gain>80.0</p_gain>
+        <i_gain>0.5</i_gain>
+        <d_gain>12.0</d_gain>
+        <cmd_max>200</cmd_max>
+        <cmd_min>-200</cmd_min>
+      </plugin>
+      <plugin filename="gz-sim-joint-state-publisher-system"
+              name="gz::sim::systems::JointStatePublisher">
+        <topic>/conveyor_01/joint_state</topic>
+        <joint_name>belt</joint_name>
+      </plugin>
+    </model>
+
+    <!-- ================= robotic_arm_01 =================
+      Two revolute joints, a shoulder and an elbow, with a gripper visual at the
+      end. Zones are joint poses in trusted adapter configuration; no proposal,
+      policy, or lease ever names a joint.
+    -->
+    <model name="robotic_arm_01">
+      <pose>-2 -3 0 0 0 0</pose>
+      <link name="base">
+        <inertial>
+          <mass>30</mass>
+          <inertia><ixx>2</ixx><iyy>2</iyy><izz>2</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry><box><size>0.4 0.4 0.2</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.4 0.4 0.2</size></box></geometry>
+          <material><ambient>0.2 0.2 0.25 1</ambient><diffuse>0.25 0.25 0.3 1</diffuse></material>
+        </visual>
+      </link>
+
+      <link name="upper_arm">
+        <pose>0 0 0.2 0 0 0</pose>
+        <inertial>
+          <mass>2</mass>
+          <inertia><ixx>0.05</ixx><iyy>0.05</iyy><izz>0.01</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+        </inertial>
+        <collision name="collision">
+          <pose>0.25 0 0 0 1.5708 0</pose>
+          <geometry><cylinder><radius>0.05</radius><length>0.5</length></cylinder></geometry>
+        </collision>
+        <visual name="visual">
+          <pose>0.25 0 0 0 1.5708 0</pose>
+          <geometry><cylinder><radius>0.05</radius><length>0.5</length></cylinder></geometry>
+          <material><ambient>0.6 0.5 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material>
+        </visual>
+      </link>
+
+      <link name="forearm">
+        <pose>0.5 0 0.2 0 0 0</pose>
+        <inertial>
+          <mass>1</mass>
+          <inertia><ixx>0.02</ixx><iyy>0.02</iyy><izz>0.005</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+        </inertial>
+        <collision name="collision">
+          <pose>0.2 0 0 0 1.5708 0</pose>
+          <geometry><cylinder><radius>0.04</radius><length>0.4</length></cylinder></geometry>
+        </collision>
+        <visual name="visual">
+          <pose>0.2 0 0 0 1.5708 0</pose>
+          <geometry><cylinder><radius>0.04</radius><length>0.4</length></cylinder></geometry>
+          <material><ambient>0.6 0.5 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material>
+        </visual>
+        <visual name="tool">
+          <pose>0.42 0 0 0 0 0</pose>
+          <geometry><box><size>0.08 0.12 0.08</size></box></geometry>
+          <material><ambient>0.1 0.5 0.5 1</ambient><diffuse>0.1 0.7 0.7 1</diffuse></material>
+        </visual>
+      </link>
+
+      <joint name="shoulder" type="revolute">
+        <parent>base</parent>
+        <child>upper_arm</child>
+        <axis>
+          <xyz>0 1 0</xyz>
+          <limit><lower>-1.4</lower><upper>1.4</upper><effort>200</effort><velocity>1.5</velocity></limit>
+          <dynamics><damping>2.0</damping></dynamics>
+        </axis>
+      </joint>
+
+      <joint name="elbow" type="revolute">
+        <parent>upper_arm</parent>
+        <child>forearm</child>
+        <axis>
+          <xyz>0 1 0</xyz>
+          <limit><lower>-1.4</lower><upper>1.4</upper><effort>150</effort><velocity>1.5</velocity></limit>
+          <dynamics><damping>1.5</damping></dynamics>
+        </axis>
+      </joint>
+
+      <plugin filename="gz-sim-joint-position-controller-system"
+              name="gz::sim::systems::JointPositionController">
+        <joint_name>shoulder</joint_name>
+        <topic>/robotic_arm_01/shoulder_cmd</topic>
+        <!-- High enough that the joint holds a commanded pose against the arm's
+             own weight. A gain too low leaves a steady-state error the adapter
+             would read as "never settled", which is a statement about the gain
+             rather than about the machine. -->
+        <p_gain>600.0</p_gain>
+        <i_gain>40.0</i_gain>
+        <d_gain>60.0</d_gain>
+        <i_max>200</i_max>
+        <i_min>-200</i_min>
+        <cmd_max>400</cmd_max>
+        <cmd_min>-400</cmd_min>
+      </plugin>
+      <plugin filename="gz-sim-joint-position-controller-system"
+              name="gz::sim::systems::JointPositionController">
+        <joint_name>elbow</joint_name>
+        <topic>/robotic_arm_01/elbow_cmd</topic>
+        <p_gain>300.0</p_gain>
+        <i_gain>20.0</i_gain>
+        <d_gain>30.0</d_gain>
+        <i_max>150</i_max>
+        <i_min>-150</i_min>
+        <cmd_max>300</cmd_max>
+        <cmd_min>-300</cmd_min>
+      </plugin>
+      <plugin filename="gz-sim-joint-state-publisher-system"
+              name="gz::sim::systems::JointStatePublisher">
+        <topic>/robotic_arm_01/joint_state</topic>
+        <joint_name>shoulder</joint_name>
+        <joint_name>elbow</joint_name>
+      </plugin>
+    </model>
+
+    <!-- Cafe tables, so the delivery destination is a place and not a number. -->
+    <model name="table_3">
+      <static>true</static>
+      <pose>6 1.2 0.35 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.8 0.8 0.7</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.8 0.8 0.7</size></box></geometry>
+          <material><ambient>0.5 0.3 0.15 1</ambient><diffuse>0.7 0.45 0.2 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="table_1">
+      <static>true</static>
+      <pose>-6 1.2 0.35 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.8 0.8 0.7</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.8 0.8 0.7</size></box></geometry>
+          <material><ambient>0.5 0.3 0.15 1</ambient><diffuse>0.7 0.45 0.2 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>
