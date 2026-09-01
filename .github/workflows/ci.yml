@@ -41,3 +41,58 @@ jobs:
 
       - name: cargo build --release
         run: cargo build --release --verbose
+  model-adapter:
+    name: model adapter (no credentials)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Out of the workspace because it carries an HTTP and TLS stack that has
+      # no business in the authority build graph. Gated on its own, here.
+      #
+      # No step runs the live example or the verify binary: both need a provider
+      # credential, and CI has none. The containment argument is proven offline
+      # by the workspace job above.
+      - name: cargo fmt
+        working-directory: adapters/openai-compatible
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        working-directory: adapters/openai-compatible
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo build
+        working-directory: adapters/openai-compatible
+        run: cargo build --all-targets --verbose
+
+  evaluation:
+    name: deterministic adversarial evaluation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Mode A only: fixtures, a fake backend, an injected clock. No network, no
+      # credentials, no ROS, no simulator. A deterministic invariant violation
+      # returns non-zero and fails the job.
+      - name: run the deterministic scenario matrix
+        run: cargo run -p kern-eval -- run --out /tmp/deterministic.jsonl
+
+      - name: aggregate and check the records
+        run: |
+          cargo run -p kern-eval -- report --in /tmp/deterministic.jsonl --out /tmp/reports
+          cargo run -p kern-eval -- check --in /tmp/deterministic.jsonl
+
+      - name: upload the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-records
+          path: |
+            /tmp/deterministic.jsonl
+            /tmp/reports
