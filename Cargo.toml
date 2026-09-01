@@ -10,11 +10,16 @@ members = [
     "crates/kern-ai",
 ]
 
-# The ROS 2 bridge links against a sourced ROS installation through `r2r`, so it
-# cannot build on a machine without ROS. Excluded so the workspace gates stay
-# runnable everywhere; it is built from its own directory under ROS.
+# Both adapters need something the workspace gates must never need. The ROS 2
+# bridge links against a sourced ROS installation through `r2r`, so it cannot
+# build on a machine without ROS at all. The OpenAI-compatible model adapter
+# pulls an HTTP and TLS stack that has no business in the authority build graph.
+# Keeping both out means the workspace gates stay runnable everywhere, the
+# trusted dependency set stays small, and no ordinary `cargo test` can reach a
+# network or a credential. Each is built and gated from its own directory.
 exclude = [
     "adapters/nav2-bridge",
+    "adapters/openai-compatible",
 ]
 
 [workspace.package]

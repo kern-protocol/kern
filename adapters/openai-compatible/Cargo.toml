@@ -1,0 +1,30 @@
+[package]
+name = "kern-model-openai-compatible"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.81"
+license = "Apache-2.0"
+
+[dependencies]
+kern-ai = { path = "../../crates/kern-ai", default-features = false, features = ["std"] }
+# A blocking HTTP client with rustls. Blocking on purpose: it keeps the whole
+# provider path synchronous, so no async runtime appears anywhere in Kern.
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+kern-core = { path = "../../crates/kern-core" }
+kern-policy = { path = "../../crates/kern-policy" }
+
+[dev-dependencies]
+kern-authority = { path = "../../crates/kern-authority" }
+kern-enforcer = { path = "../../crates/kern-enforcer" }
+kern-execution = { path = "../../crates/kern-execution" }
+kern-execution-nav2 = { path = "../../crates/kern-execution-nav2" }
+kern-ai = { path = "../../crates/kern-ai", features = ["fake-models"] }
+
+[[bin]]
+name = "verify"
+path = "src/bin/verify.rs"
+
+[[example]]
+name = "live"
+path = "examples/live.rs"
