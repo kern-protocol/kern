@@ -21,6 +21,15 @@ kern-execution-nav2 = { path = "../../crates/kern-execution-nav2", default-featu
 kern-enforcer = { path = "../../crates/kern-enforcer" }
 kern-authority = { path = "../../crates/kern-authority" }
 kern-policy = { path = "../../crates/kern-policy" }
+# Phase 7: the untrusted proposal plane, and one provider behind it. Neither
+# reaches r2r, and neither is on the path of the Phase 6 driver.
+kern-ai = { path = "../../crates/kern-ai" }
+kern-model-openai-compatible = { path = "../openai-compatible" }
+# Phase 8: the evaluation record vocabulary, so a simulation run emits the same
+# records the deterministic and live evaluators do.
+kern-eval = { path = "../../evaluation/kern-eval" }
+kern-execution-conveyor = { path = "../../crates/kern-execution-conveyor" }
+kern-execution-arm = { path = "../../crates/kern-execution-arm" }
 r2r = "0.9"
 futures = "0.3"
 getrandom = "0.2"
@@ -28,3 +37,18 @@ getrandom = "0.2"
 [[bin]]
 name = "kern-nav2-demo"
 path = "src/main.rs"
+
+# Phase 7: the same pipeline with a language model in front of it.
+[[bin]]
+name = "kern-ai-demo"
+path = "src/bin/ai_demo.rs"
+
+# Phase 8: the representative simulation scenarios, emitting evaluation records.
+[[bin]]
+name = "kern-eval-sim"
+path = "src/bin/eval_sim.rs"
+
+# The heterogeneous validation: three machines behind one authority architecture.
+[[bin]]
+name = "kern-hetero-demo"
+path = "src/bin/hetero_demo.rs"
