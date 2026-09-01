@@ -240,6 +240,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kern-ai"
+version = "0.0.0"
+dependencies = [
+ "kern-authority",
+ "kern-core",
+ "kern-enforcer",
+ "kern-execution",
+ "kern-execution-nav2",
+ "kern-policy",
+ "sha2",
+]
+
+[[package]]
 name = "kern-authority"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,35 @@
+[package]
+name = "kern-ai"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# The example shares the tests' pipeline harness, which is a module rather than
+# a target of its own.
+autoexamples = false
+
+[dependencies]
+kern-core = { path = "../kern-core", default-features = false }
+kern-policy = { path = "../kern-policy", default-features = false }
+kern-execution = { path = "../kern-execution", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+
+[features]
+default = ["std", "fake-models"]
+std = ["kern-core/std", "kern-policy/std", "kern-execution/std", "sha2/std"]
+# Deterministic, network-free `ProposalModel` implementations, including the
+# adversarial ones. They ship in the library rather than in `tests/` because the
+# integration tests and the demo example need the same ones, and because a model
+# backend is not a security boundary: it decides nothing about authority.
+fake-models = []
+
+[dev-dependencies]
+kern-authority = { path = "../kern-authority" }
+kern-enforcer = { path = "../kern-enforcer" }
+kern-execution-nav2 = { path = "../kern-execution-nav2" }
+
+[[example]]
+name = "plane"
+path = "examples/plane.rs"
+required-features = ["fake-models"]
