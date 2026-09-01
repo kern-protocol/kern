@@ -92,8 +92,30 @@ kern-core            domain vocabulary + wire protocol + clock abstractions
         |                       deps: kern-core, kern-enforcer, sha2
         |
         +-- kern-execution-nav2  Nav2 executor + fake backend (ROS-free)
-                                 default feature: fake-backend
-                                 deps: kern-core, kern-execution
+        |                        default feature: fake-backend
+        |                        deps: kern-core, kern-execution
+        |
+        +-- kern-ai            untrusted AI proposal plane: planning request,
+                               ProposalModel, strict local parser, provenance
+                               no_std + alloc; no HTTP, no TLS, no async, no
+                               provider knowledge, no credentials
+                               default features: std, fake-models
+                               deps: kern-core, kern-policy, kern-execution, sha2
+
+adapters/openai-compatible  OpenAI-compatible gateway adapter: a local or
+                        hosted Ollama daemon, Nebius Token Factory, or any
+                        compatible host
+                        excluded from workspace (HTTP + TLS stack)
+                        deps: kern-ai, kern-core, kern-policy, ureq (rustls)
+
+evaluation/kern-eval    adversarial evaluation harness: versioned scenarios,
+                        deterministic runner, authority probes, invariant checks,
+                        machine-readable records, report aggregation
+                        workspace member; no network, no ROS, no serde
+                        deps: the six Kern crates
+
+evaluation/kern-eval-live   the same harness driven by a live model
+                        excluded from workspace (depends on the gateway adapter)
 
 adapters/nav2-bridge    r2r (ROS 2) bridge binary: kern-nav2-demo
                         excluded from workspace (needs a sourced ROS install)
@@ -122,6 +144,13 @@ adapters/nav2-bridge/integration  Layer 3 harness: real r2r client vs fake rclpy
   closest thing to an executable entry point.
 - **`kern-execution-nav2` exists** as the Nav2-specific executor crate, keeping
   all ROS dependency out of the core.
+- **`kern-ai` exists and is not in the §8 target.** It is the untrusted proposal
+  plane: it converts a model's bytes into an `ActionProposal` and stops there,
+  holding no registry, policy set, issuer, enforcer, or governor. It is
+  documented in [ai-proposal-plane.md](ai-proposal-plane.md).
+- **`evaluation/kern-eval` is a harness, not a subsystem.** It calls the public
+  APIs of the crates above it and has no privileged path into any of them. It is
+  documented in [adversarial-evaluation.md](adversarial-evaluation.md).
 
 ## 3. The end-to-end authority path (implemented)
 

@@ -25,6 +25,9 @@ authority.**
 | [edge-enforcement.md](edge-enforcement.md) | The edge enforcer: verify-once installation, freshness, the hot path, receipt-vs-authority |
 | [execution-governor.md](execution-governor.md) | `kern-execution`: the authority-loss contract, the three orthogonal state axes, observation and reconciliation |
 | [nav2-integration.md](nav2-integration.md) | The Nav2 executor, the `r2r` bridge adapter, and the Gazebo demo |
+| [ai-proposal-plane.md](ai-proposal-plane.md) | `kern-ai`: untrusted model proposals, the strict parser, provenance, and why model compromise is not authority compromise |
+| [adversarial-evaluation.md](adversarial-evaluation.md) | `kern-eval`: the adversarial evaluation harness, scenario format, metrics and their denominators, invariant violations, reproduction |
+| [heterogeneous-validation.md](heterogeneous-validation.md) | Three machine classes under one authority architecture: capability-scoped slots, device routing, per-machine policy, cross-device isolation |
 | [threat-model.md](threat-model.md) | Trust boundaries, failure semantics, open problems, security language |
 | [evaluation.md](evaluation.md) | Implementation status, test inventory, measurement plan |
 

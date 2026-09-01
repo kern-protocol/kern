@@ -33,6 +33,18 @@ is measured, it is described as *planned* or *designed*, not *measured*.
 | Nav2 executor + `FakeNav2Backend` | `kern-execution-nav2` | implemented |
 | `r2r` ROS 2 bridge + `kern-nav2-demo` binary | `adapters/nav2-bridge` | implemented |
 | Gazebo world + Nav2 params + launch | `ros2/kern_nav2_demo` | implemented |
+| Untrusted proposal plane (`PlanningRequest`, `ProposalModel`, strict parser, provenance, bounded replan) | `kern-ai` | implemented |
+| Deterministic and adversarial model backends | `kern-ai` (`fake-models`) | implemented |
+| OpenAI-compatible gateway adapter (Ollama local/cloud, Nebius Token Factory, custom) | `adapters/openai-compatible` | implemented |
+| Live gateway inference and the 15-prompt suite | `adapters/openai-compatible` | implemented, run live against Ollama |
+| Live model to Nav2 to Gazebo end to end, allowed and denied | `ros2/kern_nav2_demo/validation/stage4_ai_e2e.sh` | implemented, run live |
+| Conveyor executor + fake backend | `kern-execution-conveyor` | implemented |
+| Robotic-arm executor + fake backend | `kern-execution-arm` | implemented |
+| Heterogeneous world, three device slots, three policies | `kern-eval::world`, `ros2/.../kern_workspace.sdf` | implemented, run live |
+| Cross-device and cross-capability authority isolation | `evaluation/kern-eval/tests/heterogeneous.rs`, `ros2/.../stage6_heterogeneous.sh` | implemented, run live |
+| Adversarial evaluation harness (scenarios, records, metrics, invariants) | `evaluation/kern-eval` | implemented |
+| Live-model evaluation runner | `evaluation/kern-eval-live` | implemented, run live |
+| Gazebo evaluation scenarios and physical observation merge | `adapters/nav2-bridge/src/bin/eval_sim.rs`, `ros2/.../stage5_evaluation.sh` | implemented, run live |
 | Layer 3 integration harness (real `r2r` vs fake `rclpy` server) | `adapters/nav2-bridge/integration` | implemented |
 | Phase 6 acceptance validation (launch / nav / e2e + fault injection) | `ros2/kern_nav2_demo/validation` | implemented |
 
@@ -112,6 +124,36 @@ kern-execution-nav2
   tests/governor.rs             Nav2 executor under governor, speed-limit, lapse->cancel
   tests/mapping.rs              unit conversion, NavigateRequest, command digest
   examples/demo.rs, harness.rs  runnable ROS-free demos
+
+kern-ai
+  tests/parser.rs               layer 1: raw provider bytes against the strict parser
+  tests/containment.rs          layers 2-4: normalization, policy, and whole-pipeline
+                                containment of deterministic and hostile models
+  tests/provenance.rs           stage ordering, resource bounds, never-panics pass
+  tests/support/mod.rs          the one canonical demo host, shared with the live example
+  examples/plane.rs             runnable offline demo, allowed and denied
+
+adapters/openai-compatible (needs a reachable gateway; separate workspace)
+  src/bin/verify.rs             lists the models a key can actually call
+  examples/live.rs              layer 5: the 15-prompt live suite and the two demos
+
+evaluation/kern-eval
+  tests/evaluator.rs            the harness itself: schema versioning, duplicate
+                                ids, classification, would-be-flagged violations,
+                                denominators, percentile method, reproducibility
+  src/                          scenario loader, runner, probes, invariants,
+                                records, report aggregation
+
+adapters/nav2-bridge (needs ROS)
+  src/bin/ai_demo.rs            layer 6: kern-ai-demo — a live model in front of
+                                the Phase 6 pipeline; the denied path creates no
+                                ROS node at all
+  src/bin/eval_sim.rs           the Phase 8 simulation scenarios, emitting the
+                                same evaluation records as the other two modes
+  ros2/.../validation/stage4_ai_e2e.sh
+                                Phase 7 acceptance: live model -> Kern -> Nav2 ->
+                                Gazebo, allowed and denied, with /cmd_vel,
+                                /odom, /speed_limit and goal-status recorded
 
 adapters/nav2-bridge (needs ROS; separate workspace)
   integration/                  Layer 3 harness: real r2r client vs fake rclpy
