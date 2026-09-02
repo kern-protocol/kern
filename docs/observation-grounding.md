@@ -197,7 +197,55 @@ deciding how old a pose reading is — and no crate that decides authority
 (`kern-core`, `kern-authority`, `kern-enforcer`, `kern-execution`) depends on
 `kern-ai` at all, which a test asserts against their manifests.
 
+## A stationary robot publishes nothing
+
+AMCL publishes `amcl_pose` on filter update. A robot that is not moving produces
+no update, so it produces no pose. An observer that only listens receives the
+publisher's retained sample, correctly judges it stale, and reports `UNKNOWN` —
+honest, and useless, because it is the standing-still case in which somebody is
+most likely to ask the robot to go somewhere.
+
+Measured on the live stack: `/amcl` lifecycle-active, `/scan` at 2.1 Hz, `/odom`
+at 5.7 Hz, and `ros2 topic hz /amcl_pose` producing no stream at all. A single
+delivery arrived, was the retained sample, and was refused at ~70 s old. Calling
+`/request_nomotion_update` produced a fresh pose immediately.
+
+So the observer calls it, while it has no usable pose, rate-limited and bounded
+in attempts.
+
+**The request is not pose data.** `std_srvs/srv/Empty` carries nothing in either
+direction. Nothing in the reply is read, nothing about it is trusted, and a
+successful call is not evidence a pose exists — it is a hint to another node
+that now would be a good time to publish one. The only thing ever treated as an
+observation is an `/amcl_pose` message that arrives afterwards and survives the
+same source-stamp, clock-domain, ordering and freshness rules as any other. The
+time of the request is never used as the time of a pose. If the service is
+absent, the call fails, or nothing is published, the observation stays `UNKNOWN`.
+
+### The observer is no longer read-only
+
+It has one service client, to one named service, carrying an empty message,
+whose documented effect is that a localization filter runs an update over data
+it already holds. It reaches no action server, no velocity topic and no
+controller, and it cannot move the machine. That is a much weaker capability
+than publishing, but it is not nothing, and the earlier claim that this node can
+only read was withdrawn rather than quietly reinterpreted.
+
+What the claim was protecting still holds: a refused proposal cannot publish a
+speed limit or send a goal, because at the moment of refusal there is no
+publisher and no action client anywhere in the process.
+
+Disable it with `nomotion_service: None`, and the observer waits and reports
+honestly, as before.
+
 ## One subscription, not two
+
+**This was not the cause of the live failure, and the section below is kept
+because the reasoning behind it was wrong in a way worth recording.** The
+delivery counters added alongside it are what proved it: a run reported
+`deliveries: 1 (accepted 1, duplicate 0, superseded 0)`, which says the
+subscription worked, one retained sample arrived, and the freshness logic
+correctly refused it. The localizer was silent, not the subscriber.
 
 An earlier version opened two subscriptions on one node — transient-local to
 receive a publisher's retained sample, volatile to stay compatible with a
