@@ -466,3 +466,222 @@ fn no_action_still_stops_before_policy_even_when_grounded() {
     assert!(walk.is_inert(), "{walk:?}");
     assert_eq!(pipeline.goals_sent(), 0);
 }
+
+// ---- lifecycle: what the host knows, and when ---------------------------
+//
+// These drive `resolve` directly rather than a thread. The defect they exist
+// for was a live run reporting "no reading has arrived yet" while the topic was
+// demonstrably publishing, and the thing that made it hard to see was that the
+// rule for turning "what has arrived so far" into an observation only ever ran
+// behind a ROS subscription. It runs here instead, in microseconds, with no
+// sleeping and no clock.
+
+use kern_ai::observation::{resolve, ObservationSnapshot};
+
+#[test]
+fn nothing_heard_and_nobody_publishing_is_not_the_same_as_nothing_heard() {
+    // The distinction the live failure needed and did not have. One of these
+    // sends an operator to look at the localizer; the other sends them to wait.
+    let silent = resolve(
+        device(),
+        ObservationSnapshot {
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert_eq!(
+        silent.pose().unavailable(),
+        Some(ObservationUnavailable::NotYetReceived)
+    );
+
+    let absent = resolve(device(), ObservationSnapshot::pending(), 5_000);
+    assert_eq!(
+        absent.pose().unavailable(),
+        Some(ObservationUnavailable::SourceUndiscovered)
+    );
+    assert_ne!(silent.pose(), absent.pose());
+}
+
+#[test]
+fn a_snapshot_before_delivery_is_unavailable_and_after_it_is_known() {
+    // The ordering property, stated as data rather than as a sleep.
+    let before = resolve(device(), ObservationSnapshot::pending(), 5_000);
+    assert!(before.pose().pose().is_none());
+
+    let after = resolve(
+        device(),
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(-8_000, 0, 0, 12)),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert_eq!(after.pose().pose().expect("known").x_mm(), -8_000);
+}
+
+#[test]
+fn a_bounded_wait_transitions_from_undiscovered_to_known() {
+    // The states a real wait passes through, in order, with no threads: no
+    // publisher, then a publisher but no message, then a reading.
+    let steps = [
+        ObservationSnapshot::pending(),
+        ObservationSnapshot {
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(-8_000, 0, 0, 12)),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+    ];
+    let resolved: Vec<_> = steps
+        .into_iter()
+        .map(|snapshot| resolve(device(), snapshot, 5_000))
+        .collect();
+
+    assert_eq!(
+        resolved[0].pose().unavailable(),
+        Some(ObservationUnavailable::SourceUndiscovered)
+    );
+    assert_eq!(
+        resolved[1].pose().unavailable(),
+        Some(ObservationUnavailable::NotYetReceived)
+    );
+    assert!(resolved[2].pose().is_known());
+    // And nothing along the way invented a position.
+    for step in &resolved[..2] {
+        assert!(!step.to_block().contains("x = 0 mm"));
+    }
+}
+
+#[test]
+fn a_timeout_leaves_the_observation_unavailable_and_never_at_the_origin() {
+    let timed_out = resolve(
+        device(),
+        ObservationSnapshot {
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert!(timed_out.pose().pose().is_none());
+    let block = timed_out.to_block();
+    assert!(block.contains("UNKNOWN"));
+    assert!(block.contains("Do not assume the robot is at the origin"));
+}
+
+#[test]
+fn a_stale_first_reading_does_not_become_known() {
+    // The case a latched sample produces: a real reading, delivered the moment
+    // the subscription matches, that is older than the host will plan on.
+    let resolved = resolve(
+        device(),
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(-8_000, 0, 0, 60_000)),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert_eq!(
+        resolved.pose().unavailable(),
+        Some(ObservationUnavailable::Stale {
+            age_ms: 60_000,
+            max_age_ms: 5_000,
+        })
+    );
+    assert!(!resolved.to_block().contains("-8000"));
+}
+
+#[test]
+fn an_unusable_first_reading_does_not_fabricate_a_pose() {
+    for error in [
+        ConversionError::NotANumber,
+        ConversionError::Infinite,
+        ConversionError::OutOfRange,
+    ] {
+        let resolved = resolve(
+            device(),
+            ObservationSnapshot {
+                last_error: Some(error),
+                publisher_seen: true,
+                ..ObservationSnapshot::pending()
+            },
+            5_000,
+        );
+        assert_eq!(
+            resolved.pose().unavailable(),
+            Some(ObservationUnavailable::Unrepresentable(error))
+        );
+        assert!(resolved.pose().pose().is_none());
+    }
+}
+
+#[test]
+fn a_stopped_source_outranks_a_reading_it_left_behind() {
+    // A reading from a source that has since stopped is a reading of unknown
+    // age from an unknown past, however recent its timestamp looks.
+    let resolved = resolve(
+        device(),
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(-8_000, 0, 0, 5)),
+            publisher_seen: true,
+            source_alive: false,
+            last_error: None,
+        },
+        5_000,
+    );
+    assert_eq!(
+        resolved.pose().unavailable(),
+        Some(ObservationUnavailable::SourceUnavailable)
+    );
+}
+
+#[test]
+fn a_conversion_failure_outranks_nothing_yet() {
+    // Both are "no pose". The conversion failure is the more specific and more
+    // useful statement about the same absence, so it is the one reported.
+    let resolved = resolve(
+        device(),
+        ObservationSnapshot {
+            last_error: Some(ConversionError::NotANumber),
+            publisher_seen: false,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert_eq!(
+        resolved.pose().unavailable(),
+        Some(ObservationUnavailable::Unrepresentable(
+            ConversionError::NotANumber
+        ))
+    );
+}
+
+#[test]
+fn the_model_is_given_the_post_wait_observation() {
+    // The property the live defect broke: the request must carry what was
+    // resolved after the wait, not a snapshot taken before it.
+    let authority = control_plane();
+    let before = resolve(device(), ObservationSnapshot::pending(), 5_000);
+    let after = resolve(
+        device(),
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(-8_000, 0, 0, 12)),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert_ne!(before, after);
+
+    let request =
+        planning_request(&authority, "Move to x = 0, y = 0 at 300 mm/s.").with_observation(after);
+    let system = system_prompt(&request);
+
+    assert!(system.contains("x = -8000 mm"), "{system}");
+    assert!(!system.contains("UNKNOWN"), "{system}");
+}
