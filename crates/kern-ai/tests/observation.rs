@@ -631,6 +631,7 @@ fn a_stopped_source_outranks_a_reading_it_left_behind() {
             publisher_seen: true,
             source_alive: false,
             last_error: None,
+            age_error: None,
         },
         5_000,
     );
@@ -684,4 +685,238 @@ fn the_model_is_given_the_post_wait_observation() {
 
     assert!(system.contains("x = -8000 mm"), "{system}");
     assert!(!system.contains("UNKNOWN"), "{system}");
+}
+
+// ---- source freshness: a retained sample is not a fresh sample ----------
+//
+// The blocking defect these exist for: a TRANSIENT_LOCAL subscription is
+// handed a sample that was published long ago, the host stamps it with the
+// instant it was *received*, and an hour-old observation is presented to the
+// planner as three milliseconds old. Receipt age answers "how long have I held
+// this", which is not the question.
+
+use kern_ai::observation::{observation_age_ms, SourceAgeError, SourceClock, SourceTime};
+
+/// Simulated time, as `/clock` would report it: seconds since the run started.
+fn sim(seconds: i64) -> SourceTime {
+    SourceTime::from_nanos((seconds as i128) * 1_000_000_000)
+}
+
+#[test]
+fn a_freshly_published_sample_is_fresh() {
+    // Stamped 100 ms ago in the source's own domain, received now.
+    let age = observation_age_ms(sim(30), SourceClock::Established(sim(30)), 4);
+    assert_eq!(age, Ok(4), "source age zero, so receipt age is the answer");
+}
+
+#[test]
+fn a_retained_sample_is_as_old_as_its_stamp_not_its_delivery() {
+    // The defect, stated directly. Published at simulated t=0.1s, delivered to
+    // a new subscriber at simulated t=600s. Receipt age is 3 ms because it
+    // genuinely did arrive 3 ms ago; the observation is ten minutes old.
+    let stamp = SourceTime::from_ros(0, 100_000_000);
+    let now = SourceClock::Established(sim(600));
+    assert_eq!(observation_age_ms(stamp, now, 3), Ok(599_900));
+}
+
+#[test]
+fn a_stale_retained_sample_resolves_to_stale_and_hides_its_coordinates() {
+    let stamp = SourceTime::from_ros(0, 100_000_000);
+    let age = observation_age_ms(stamp, SourceClock::Established(sim(600)), 3).expect("datable");
+    let resolved = resolve(
+        device(),
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(-8_000, 0, 0, age)),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert!(matches!(
+        resolved.pose().unavailable(),
+        Some(ObservationUnavailable::Stale { .. })
+    ));
+    assert!(!resolved.to_block().contains("-8000"));
+    assert!(resolved.to_block().contains("UNKNOWN"));
+}
+
+#[test]
+fn receipt_age_still_wins_when_it_is_the_larger_of_the_two() {
+    // A coarse or lagging source clock must not make a reading look younger
+    // than the host knows it to be. The answer is the larger of two lower
+    // bounds, never a blend and never the smaller.
+    assert_eq!(
+        observation_age_ms(sim(10), SourceClock::Established(sim(10)), 8_000),
+        Ok(8_000)
+    );
+    assert_eq!(
+        observation_age_ms(sim(10), SourceClock::Established(sim(20)), 1),
+        Ok(10_000)
+    );
+}
+
+#[test]
+fn an_unset_stamp_is_refused_rather_than_read_as_the_start_of_time() {
+    // sec = 0, nanosec = 0 is what a publisher that never filled in the header
+    // leaves behind — and it is also a legitimate simulated instant. The two
+    // are indistinguishable, and one of them would make any reading look new.
+    assert_eq!(
+        observation_age_ms(
+            SourceTime::from_ros(0, 0),
+            SourceClock::Established(sim(600)),
+            3
+        ),
+        Err(SourceAgeError::Unset)
+    );
+}
+
+#[test]
+fn no_clock_in_the_stamps_domain_means_no_age() {
+    // A paused simulator stops publishing /clock, so the simulated present
+    // becomes unknown. Unknown age is not fresh.
+    assert_eq!(
+        observation_age_ms(sim(30), SourceClock::Unavailable, 3),
+        Err(SourceAgeError::ClockUnavailable)
+    );
+}
+
+#[test]
+fn a_stamp_far_in_the_future_is_refused() {
+    // A clock that reset, a simulation that restarted, or two domains being
+    // compared. None of those is a very fresh observation.
+    let error = observation_age_ms(sim(600), SourceClock::Established(sim(30)), 3);
+    assert!(
+        matches!(error, Err(SourceAgeError::Future { .. })),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_stamp_slightly_ahead_of_the_clock_is_an_ordinary_race() {
+    // Publisher and clock sample race constantly. A stamp a little ahead is
+    // normal and falls back to receipt age rather than being refused.
+    let just_ahead = SourceTime::from_nanos(sim(30).nanos() + 200_000_000);
+    assert_eq!(
+        observation_age_ms(just_ahead, SourceClock::Established(sim(30)), 7),
+        Ok(7)
+    );
+}
+
+#[test]
+fn an_undatable_reading_never_reaches_the_planner_as_a_position() {
+    for error in [
+        SourceAgeError::Unset,
+        SourceAgeError::ClockUnavailable,
+        SourceAgeError::Future { by_ms: 570_000 },
+    ] {
+        let resolved = resolve(
+            device(),
+            ObservationSnapshot {
+                age_error: Some(error),
+                publisher_seen: true,
+                ..ObservationSnapshot::pending()
+            },
+            5_000,
+        );
+        assert_eq!(
+            resolved.pose().unavailable(),
+            Some(ObservationUnavailable::SourceTimeUnusable(error))
+        );
+        let block = resolved.to_block();
+        assert!(block.contains("UNKNOWN"), "{block}");
+        for forbidden in ["x = 0 mm", "y = 0 mm", "yaw = 0 mdeg"] {
+            assert!(!block.contains(forbidden), "{block}");
+        }
+    }
+}
+
+#[test]
+fn a_paused_ros_clock_does_not_make_an_observation_stay_fresh() {
+    // With simulated time frozen, source age stops advancing. Receipt age does
+    // not, because it is measured on the host's monotonic clock — so a reading
+    // still ages out, and the observation still goes stale. This is also the
+    // demonstration that the two clocks are used for two different jobs.
+    let frozen = SourceClock::Established(sim(30));
+    let stamp = sim(30);
+    assert_eq!(observation_age_ms(stamp, frozen, 0), Ok(0));
+    assert_eq!(observation_age_ms(stamp, frozen, 30_000), Ok(30_000));
+
+    let resolved = resolve(
+        device(),
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(1, 2, 3, 30_000)),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert!(matches!(
+        resolved.pose().unavailable(),
+        Some(ObservationUnavailable::Stale { .. })
+    ));
+}
+
+#[test]
+fn source_stamps_order_observations() {
+    // The comparison the adapter's replace rule is built on: strictly newer
+    // wins, equal is the same observation, older never replaces newer.
+    assert!(sim(31) > sim(30));
+    assert!(sim(30) == sim(30));
+    assert!(!(sim(29) > sim(30)));
+    // And across the sec/nanosec boundary, which is where a hand-rolled
+    // comparison would go wrong.
+    assert!(SourceTime::from_ros(1, 0) > SourceTime::from_ros(0, 999_999_999));
+}
+
+#[test]
+fn authority_lifetime_does_not_depend_on_ros_time() {
+    // Observation freshness may consult a ROS clock. Authority lifetime must
+    // not, and this asserts it structurally: no crate that decides authority
+    // has any dependency on the observation module or on a ROS clock, and the
+    // observation types are not reachable from an authority decision.
+    //
+    // The compile-time form of this claim is that `kern-core`, `kern-authority`
+    // and `kern-enforcer` do not depend on `kern-ai` at all, so nothing here
+    // can reach them. The runtime form is already covered by
+    // `the_same_proposal_is_decided_identically_with_and_without_an_observation`.
+    let manifests = [
+        include_str!("../../kern-core/Cargo.toml"),
+        include_str!("../../kern-authority/Cargo.toml"),
+        include_str!("../../kern-enforcer/Cargo.toml"),
+        include_str!("../../kern-execution/Cargo.toml"),
+    ];
+    for manifest in manifests {
+        assert!(
+            !manifest.contains("kern-ai"),
+            "an authority crate gained a dependency on the proposal plane"
+        );
+    }
+}
+
+#[test]
+fn no_shipped_robot_context_asserts_a_position() {
+    // The regression guard for the original defect. A host may describe its
+    // world — named places, corridor geometry, what the machine is for — but it
+    // may not state where the robot is. That is what observation is for, and a
+    // sentence cannot be current.
+    let shipped = [
+        include_str!("../../../adapters/nav2-bridge/src/bin/ai_demo.rs"),
+        include_str!("../../../evaluation/kern-eval/src/world.rs"),
+        include_str!("../../../adapters/openai-compatible/src/bin/verify.rs"),
+        include_str!("support/mod.rs"),
+    ];
+    for source in shipped {
+        for line in source.lines() {
+            let text = line.trim();
+            // Skip doc comments and ordinary comments: the historical sentence
+            // is quoted in several explanations of why it was removed.
+            if text.starts_with("//") {
+                continue;
+            }
+            assert!(
+                !text.contains("at the origin, idle"),
+                "a fabricated physical position came back: {text}"
+            );
+        }
+    }
 }
