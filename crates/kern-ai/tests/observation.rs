@@ -1180,3 +1180,172 @@ fn the_counters_separate_a_silent_topic_from_a_rejected_stream() {
     assert_eq!(rejecting.accepted(), 1);
     assert_eq!(rejecting.superseded(), 5);
 }
+
+// ---- asking the localizer to publish, and not trusting that it did ------
+//
+// AMCL publishes on filter update. A stationary robot produces none, so an
+// observer that only listens receives the retained sample, correctly rejects it
+// as stale, and reports UNKNOWN forever. Requesting a no-motion update makes the
+// source produce a current estimate.
+//
+// The request is std_srvs/srv/Empty and carries no data in either direction.
+// These tests state the thing that matters: a successful request is not an
+// observation, and every pose that follows one is judged exactly as any other.
+
+#[test]
+fn a_no_motion_update_followed_by_a_newer_pose_yields_a_fresh_observation() {
+    // Requirement 1. Retained stale pose, then the nudge, then a live pose.
+    let mut ledger = PoseLedger::new();
+    ledger.record(sample(-8_000), sim(107), 0);
+
+    // Before: the retained reading is ~70 s old and unusable.
+    let stale =
+        observation_age_ms(sim(107), SourceClock::Established(sim(177)), 0).expect("datable");
+    assert_eq!(stale, 70_000);
+
+    // The service is called. Nothing about that call is a pose, and nothing
+    // here records one: the ledger is untouched by it.
+    assert_eq!(ledger.deliveries(), 1);
+
+    // AMCL then publishes. That message, and only that message, is the
+    // observation.
+    assert_eq!(
+        ledger.record(sample(-230), SourceTime::from_ros(177, 400_000_000), 70_050),
+        Admission::Accepted
+    );
+    let (pose, stamp, received_ms) = ledger.held().expect("a reading");
+    let age = observation_age_ms(
+        stamp,
+        SourceClock::Established(SourceTime::from_nanos(
+            SourceTime::from_ros(177, 400_000_000).nanos() + 30_000_000,
+        )),
+        70_080 - received_ms,
+    )
+    .expect("datable");
+    assert_eq!(age, 30);
+
+    let resolved = resolve(
+        device(),
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(
+                pose.x_mm(),
+                pose.y_mm(),
+                pose.yaw_mdeg(),
+                age,
+            )),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert!(resolved.pose().is_known());
+    assert!(resolved.to_block().contains("x = -230 mm"));
+}
+
+#[test]
+fn a_service_that_answers_but_publishes_nothing_leaves_the_observation_unknown() {
+    // Requirement 2. The reply is a hint, not evidence. With no new message the
+    // held reading is still the stale retained one, and still refused.
+    let mut ledger = PoseLedger::new();
+    ledger.record(sample(-8_000), sim(107), 0);
+    let deliveries_before = ledger.deliveries();
+
+    // A successful service call changes nothing here, because a service call is
+    // not a delivery.
+    assert_eq!(ledger.deliveries(), deliveries_before);
+
+    let age =
+        observation_age_ms(sim(107), SourceClock::Established(sim(177)), 2_000).expect("datable");
+    let resolved = resolve(
+        device(),
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(-8_000, 0, 0, age)),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert!(matches!(
+        resolved.pose().unavailable(),
+        Some(ObservationUnavailable::Stale { .. })
+    ));
+    assert!(!resolved.to_block().contains("-8000"));
+}
+
+#[test]
+fn a_failed_or_absent_service_never_fabricates_a_position() {
+    // Requirement 3. Whatever the service did, the observation states what the
+    // host knows, and it never becomes the origin.
+    for snapshot in [
+        // Nothing ever arrived.
+        ObservationSnapshot {
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        // Only an undatable reading arrived.
+        ObservationSnapshot {
+            age_error: Some(SourceAgeError::ClockUnavailable),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        // The localizer is not on the graph at all.
+        ObservationSnapshot::pending(),
+    ] {
+        let resolved = resolve(device(), snapshot, 5_000);
+        assert!(resolved.pose().pose().is_none());
+        let block = resolved.to_block();
+        assert!(block.contains("UNKNOWN"), "{block}");
+        for forbidden in ["x = 0 mm", "y = 0 mm", "yaw = 0 mdeg"] {
+            assert!(!block.contains(forbidden), "{block}");
+        }
+    }
+}
+
+#[test]
+fn a_pose_published_after_a_nudge_is_judged_like_any_other() {
+    // Requirements 4, 5, and 6 together: the nudge grants a message no
+    // standing. An older stamp is still ignored, an equal one still does not
+    // refresh, and a newer one still has to be inside the freshness bound.
+    let mut ledger = PoseLedger::new();
+    ledger.record(sample(-230), SourceTime::from_ros(177, 400_000_000), 1_000);
+
+    // Older than the held reading: ignored, however recently requested.
+    assert_eq!(
+        ledger.record(sample(-8_000), sim(107), 1_100),
+        Admission::Superseded
+    );
+    assert_eq!(ledger.stamp(), Some(SourceTime::from_ros(177, 400_000_000)));
+
+    // The same stamp again: not a second observation.
+    assert_eq!(
+        ledger.record(sample(-230), SourceTime::from_ros(177, 400_000_000), 1_200),
+        Admission::Duplicate
+    );
+    assert_eq!(
+        ledger.held().expect("held").2,
+        1_000,
+        "receipt instant held"
+    );
+
+    // Newer, but too old to plan on: still refused.
+    let too_old = observation_age_ms(
+        SourceTime::from_ros(177, 400_000_000),
+        SourceClock::Established(sim(190)),
+        0,
+    )
+    .expect("datable");
+    assert!(too_old > 5_000);
+    let resolved = resolve(
+        device(),
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(-230, 0, 0, too_old)),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert!(matches!(
+        resolved.pose().unavailable(),
+        Some(ObservationUnavailable::Stale { .. })
+    ));
+}
