@@ -47,13 +47,16 @@ use r2r::geometry_msgs::msg::PoseWithCovarianceStamped;
 use r2r::{Context, Node, QosProfile};
 
 use kern_ai::observation::{
-    meters_to_millimeters, quaternion_yaw_radians, radians_to_millidegrees, ConversionError,
-    ObservationUnavailable, PoseObservation, WorldObservation,
+    meters_to_millimeters, quaternion_yaw_radians, radians_to_millidegrees, resolve,
+    ConversionError, ObservationSnapshot, PoseObservation, WorldObservation,
 };
 use kern_core::DeviceId;
 
 /// One spin slice for the observer thread.
 const SPIN_SLICE: Duration = Duration::from_millis(20);
+
+/// How often to ask the graph whether anyone publishes the topic.
+const GRAPH_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The default localization topic.
 ///
@@ -159,6 +162,13 @@ struct Shared {
     last_error: Mutex<Option<ConversionError>>,
     /// False once the observer thread has stopped, for any reason.
     alive: AtomicBool,
+    /// True once any publisher for the topic has been seen on the graph.
+    ///
+    /// Latching rather than instantaneous: a publisher that appeared and went
+    /// away is still evidence that the topic exists and is worth waiting for,
+    /// and it distinguishes "the localizer is silent" from "the localizer is
+    /// not running", which send an operator to different places.
+    publisher_seen: AtomicBool,
 }
 
 /// A read-only view of where the robot is.
@@ -193,6 +203,7 @@ impl PoseObserver {
             latest: Mutex::new(None),
             last_error: Mutex::new(None),
             alive: AtomicBool::new(true),
+            publisher_seen: AtomicBool::new(false),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let max_age_ms = config.max_age_ms;
@@ -209,16 +220,44 @@ impl PoseObserver {
                 // a stale reading looking live: the thread is marked dead and
                 // every later observation says the source is unavailable.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let (mut node, subscription) = match Context::create()
+                    let (mut node, latched, live) = match Context::create()
                         .and_then(|context| {
                             Node::create(context, &config.node_name, &config.namespace)
                         })
                         .and_then(|mut node| {
-                            let subscription = node.subscribe::<PoseWithCovarianceStamped>(
+                            // Two subscriptions to one topic, because a single
+                            // durability setting cannot match both kinds of
+                            // publisher, and getting it wrong fails silently.
+                            //
+                            // TRANSIENT_LOCAL is what receives a *latched*
+                            // sample. AMCL publishes `amcl_pose` on update
+                            // rather than on a timer, so a stationary robot's
+                            // only pose may have been published long ago and
+                            // retained by the publisher. A VOLATILE subscriber
+                            // matches such a publisher perfectly well and is
+                            // simply never given the retained sample: it waits
+                            // forever for a message that already happened.
+                            // That is the defect this pair fixes.
+                            //
+                            // The volatile subscription stays because the
+                            // reverse mismatch is worse: a TRANSIENT_LOCAL
+                            // subscriber is *incompatible* with a VOLATILE
+                            // publisher and matches nothing at all, so a
+                            // deployment whose localizer publishes volatile
+                            // would go blind if this were the only one.
+                            //
+                            // Neither can produce a wrong pose. The worst a
+                            // redundant delivery does is hand over the same
+                            // reading twice, and the newest wins.
+                            let latched = node.subscribe::<PoseWithCovarianceStamped>(
+                                &config.topic,
+                                QosProfile::default().transient_local(),
+                            )?;
+                            let live = node.subscribe::<PoseWithCovarianceStamped>(
                                 &config.topic,
                                 QosProfile::default(),
                             )?;
-                            Ok((node, subscription))
+                            Ok((node, latched, live))
                         }) {
                         Ok(parts) => {
                             let _ = ready_tx.send(Ok(()));
@@ -231,7 +270,9 @@ impl PoseObserver {
                     };
                     run(
                         &mut node,
-                        Box::pin(subscription),
+                        Box::pin(latched),
+                        Box::pin(live),
+                        &config.topic,
                         &thread_shared,
                         &thread_stop,
                     );
@@ -262,42 +303,35 @@ impl PoseObserver {
     /// What the host currently knows about `device`'s position.
     ///
     /// Never blocks on ROS and never waits for a message. It reports what has
-    /// already arrived, or says explicitly that nothing usable has.
+    /// already arrived, or says explicitly why nothing usable has.
     pub fn observe(&self, device: &DeviceId) -> WorldObservation {
-        if !self.shared.alive.load(Ordering::SeqCst) {
-            return WorldObservation::unavailable(
-                device.clone(),
-                ObservationUnavailable::SourceUnavailable,
-            );
+        resolve(device.clone(), self.snapshot(), self.max_age_ms)
+    }
+
+    /// Everything known right now, in the form the shared resolver takes.
+    ///
+    /// The age is computed here, against the host's own monotonic clock, at the
+    /// moment of asking — a reading does not carry an age, it acquires one when
+    /// somebody wants to know.
+    fn snapshot(&self) -> ObservationSnapshot {
+        let reading = self.shared.latest.lock().ok().and_then(|guard| *guard);
+        let pose = reading.map(|reading| {
+            // Saturating: a monotonic clock cannot run backwards, but a wrong
+            // answer here must not be a panic on a planning path.
+            let age_ms = reading.received.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            PoseObservation::new(
+                reading.pose.x_mm(),
+                reading.pose.y_mm(),
+                reading.pose.yaw_mdeg(),
+                age_ms,
+            )
+        });
+        ObservationSnapshot {
+            pose,
+            last_error: self.shared.last_error.lock().ok().and_then(|guard| *guard),
+            publisher_seen: self.shared.publisher_seen.load(Ordering::SeqCst),
+            source_alive: self.shared.alive.load(Ordering::SeqCst),
         }
-
-        let latest = self.shared.latest.lock().ok().and_then(|guard| *guard);
-
-        let Some(reading) = latest else {
-            // Never a reading. If the last message was unusable, say which
-            // failure it was rather than the less informative "nothing yet".
-            let reason = self
-                .shared
-                .last_error
-                .lock()
-                .ok()
-                .and_then(|guard| *guard)
-                .map_or(ObservationUnavailable::NotYetReceived, |error| {
-                    ObservationUnavailable::Unrepresentable(error)
-                });
-            return WorldObservation::unavailable(device.clone(), reason);
-        };
-
-        // Saturating, because a monotonic clock cannot run backwards but a
-        // wrong answer here must not be a panic in a planning path.
-        let age_ms = reading.received.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        let aged = PoseObservation::new(
-            reading.pose.x_mm(),
-            reading.pose.y_mm(),
-            reading.pose.yaw_mdeg(),
-            age_ms,
-        );
-        WorldObservation::fresh_within(device.clone(), aged, self.max_age_ms)
     }
 
     /// The freshness bound this observer applies.
@@ -305,31 +339,83 @@ impl PoseObserver {
         self.max_age_ms
     }
 
-    /// Waits until a usable reading exists, or the deadline passes.
+    /// Whether a publisher for the topic has been discovered.
+    pub fn publisher_seen(&self) -> bool {
+        self.shared.publisher_seen.load(Ordering::SeqCst)
+    }
+
+    /// Waits, bounded, for a reading this host would actually plan on.
     ///
-    /// Returns whether one arrived. A caller that does not wait is not wrong —
-    /// `observe` reports the absence honestly — but a demo that has just
-    /// started usually wants to give AMCL a moment rather than print "no
-    /// reading yet" on every first run.
-    pub fn wait_for_first(&self, deadline: Duration) -> bool {
+    /// Returns as soon as one is usable rather than sleeping out the whole
+    /// deadline, and returns early when waiting has become pointless — a dead
+    /// source will not start producing.
+    ///
+    /// A reading that arrives already too old does **not** end the wait. That
+    /// is the case where a latched sample is delivered on subscription match
+    /// and is older than the freshness bound: the honest thing is to keep
+    /// listening for a live one until the deadline, and only then report the
+    /// staleness.
+    pub fn await_first(&self, deadline: Duration) -> ObservationReadiness {
         let until = Instant::now() + deadline;
-        while Instant::now() < until {
-            if self
-                .shared
-                .latest
-                .lock()
-                .ok()
-                .and_then(|guard| *guard)
-                .is_some()
-            {
-                return true;
+        loop {
+            let snapshot = self.snapshot();
+            if !snapshot.source_alive {
+                return ObservationReadiness::SourceStopped;
             }
-            if !self.shared.alive.load(Ordering::SeqCst) {
-                return false;
+            if snapshot
+                .pose
+                .is_some_and(|pose| pose.is_fresh_within(self.max_age_ms))
+            {
+                return ObservationReadiness::Observed;
+            }
+            if Instant::now() >= until {
+                return if snapshot.pose.is_some() {
+                    ObservationReadiness::OnlyStale
+                } else if snapshot.last_error.is_some() {
+                    ObservationReadiness::OnlyUnusable
+                } else if snapshot.publisher_seen {
+                    ObservationReadiness::PublisherSilent
+                } else {
+                    ObservationReadiness::NoPublisher
+                };
             }
             std::thread::sleep(SPIN_SLICE);
         }
-        false
+    }
+}
+
+/// How a bounded wait for a first reading ended.
+///
+/// Reported so a demo transcript records what the host was actually up against,
+/// rather than only that it ended up with nothing. Every variant other than
+/// [`Observed`](Self::Observed) leaves the observation explicitly unavailable;
+/// none of them causes a position to be assumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObservationReadiness {
+    /// A reading arrived and is within the freshness bound.
+    Observed,
+    /// No publisher for the topic was ever discovered.
+    NoPublisher,
+    /// A publisher exists, but sent nothing inside the deadline.
+    PublisherSilent,
+    /// Readings arrived and none could be represented in Kern's units.
+    OnlyUnusable,
+    /// A reading arrived but is older than the freshness bound.
+    OnlyStale,
+    /// The observer stopped while waiting.
+    SourceStopped,
+}
+
+impl std::fmt::Display for ObservationReadiness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Observed => "a pose observation arrived",
+            Self::NoPublisher => "no publisher for the pose topic was discovered",
+            Self::PublisherSilent => "a publisher exists but sent no pose in time",
+            Self::OnlyUnusable => "every pose received was unusable",
+            Self::OnlyStale => "the only pose available is older than the freshness bound",
+            Self::SourceStopped => "the observer stopped",
+        })
     }
 }
 
@@ -345,22 +431,56 @@ impl Drop for PoseObserver {
 /// The observer loop: spin, take whatever arrived, convert it, store it.
 fn run(
     node: &mut Node,
-    mut subscription: Pin<Box<impl futures::Stream<Item = PoseWithCovarianceStamped> + ?Sized>>,
+    mut latched: Pin<Box<impl futures::Stream<Item = PoseWithCovarianceStamped> + ?Sized>>,
+    mut live: Pin<Box<impl futures::Stream<Item = PoseWithCovarianceStamped> + ?Sized>>,
+    topic: &str,
     shared: &Arc<Shared>,
     stop: &Arc<AtomicBool>,
 ) {
+    let mut last_graph_check = Instant::now() - GRAPH_CHECK_INTERVAL;
     while !stop.load(Ordering::SeqCst) {
         node.spin_once(SPIN_SLICE);
-        // Drain everything queued, keeping only the newest: a planner wants the
-        // current position, not a history.
-        loop {
-            match subscription.next().now_or_never() {
-                Some(Some(message)) => apply(shared, &message),
-                // The stream ended: the subscription is gone and will not
-                // resume, so the source is no longer observable.
-                Some(None) => return,
-                None => break,
+
+        // Whether anyone publishes this topic at all. Asked on the observer
+        // thread because that is where the node lives, and periodically rather
+        // than every slice because it is a graph query, not a message read.
+        if last_graph_check.elapsed() >= GRAPH_CHECK_INTERVAL
+            && !shared.publisher_seen.load(Ordering::SeqCst)
+        {
+            if let Ok(publishers) = node.get_publishers_info_by_topic(topic, false) {
+                if !publishers.is_empty() {
+                    shared.publisher_seen.store(true, Ordering::SeqCst);
+                }
             }
+            last_graph_check = Instant::now();
+        }
+
+        // Drain both, keeping only the newest: a planner wants the current
+        // position, not a history. One stream ending means its subscription is
+        // gone; the other may still deliver, so it is not fatal on its own.
+        let latched_open = drain(&mut latched, shared);
+        let live_open = drain(&mut live, shared);
+        if !latched_open && !live_open {
+            return;
+        }
+    }
+}
+
+/// Reads whatever is queued on one subscription. Returns false once it ends.
+fn drain(
+    subscription: &mut Pin<Box<impl futures::Stream<Item = PoseWithCovarianceStamped> + ?Sized>>,
+    shared: &Arc<Shared>,
+) -> bool {
+    loop {
+        match subscription.next().now_or_never() {
+            Some(Some(message)) => {
+                // A delivered message is itself proof that a publisher exists,
+                // and it arrives before the periodic graph query would notice.
+                shared.publisher_seen.store(true, Ordering::SeqCst);
+                apply(shared, &message);
+            }
+            Some(None) => return false,
+            None => return true,
         }
     }
 }

@@ -242,9 +242,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..PoseObserverConfig::default()
         }) {
             Ok(observer) => {
-                // AMCL publishes on update rather than on a timer, so a first
-                // reading can take a moment on a freshly started stack.
-                observer.wait_for_first(options.observe_wait);
+                // Bounded, and it ends as soon as a usable reading arrives
+                // rather than sleeping out the deadline. AMCL publishes on
+                // update rather than on a timer, so on a stationary robot the
+                // reading that satisfies this is often a retained one delivered
+                // the moment the subscription matches.
+                println!(
+                    "waiting up to {:?} for a pose on {topic}",
+                    options.observe_wait
+                );
+                let readiness = observer.await_first(options.observe_wait);
+                println!("  {readiness}");
+                if !observer.publisher_seen() {
+                    println!(
+                        "  hint: nothing publishes {topic}. Check that the localizer is \
+                         running, or pass --pose-topic."
+                    );
+                }
                 Some(observer)
             }
             Err(error) => {
@@ -254,6 +268,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
 
+    // Taken after the wait, never before it: this is the observation the model
+    // is given, and it is read once, here.
     let observation = match &observer {
         Some(observer) => observer.observe(&DeviceId::new(DEVICE)),
         None => WorldObservation::unavailable(
@@ -262,7 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     };
 
-    println!("OBSERVATION");
+    println!("\nOBSERVATION");
     for line in observation.to_block().lines() {
         println!("  {line}");
     }

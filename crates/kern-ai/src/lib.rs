@@ -77,7 +77,8 @@ pub use model::{
     ResponseTooLarge,
 };
 pub use observation::{
-    ConversionError, ObservationUnavailable, PoseKnowledge, PoseObservation, WorldObservation,
+    resolve as resolve_observation, ConversionError, ObservationSnapshot, ObservationUnavailable,
+    PoseKnowledge, PoseObservation, WorldObservation,
 };
 pub use parse::{
     parse_response, ParseError, ParsedModelProposal, ProposedArgument, ProposedValue, NO_ACTION,

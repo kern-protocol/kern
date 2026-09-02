@@ -258,8 +258,17 @@ impl PoseObservation {
 /// difference between a localizer that has not started and one that has stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObservationUnavailable {
-    /// The host is subscribed but no reading has arrived yet.
+    /// The topic was discovered and has a publisher, but no reading has
+    /// arrived yet.
     NotYetReceived,
+    /// No publisher for the topic was discovered at all.
+    ///
+    /// A different fact from [`NotYetReceived`](Self::NotYetReceived), and a
+    /// far more actionable one: the localizer is not running, or is publishing
+    /// somewhere else, or a QoS setting means the two never matched. "Nothing
+    /// has arrived" and "there is nobody to hear" send an operator to
+    /// different places.
+    SourceUndiscovered,
     /// A reading arrived, but it is older than the host is willing to plan on.
     ///
     /// The age is carried so the prompt can say how stale, and so a reader of a
@@ -287,7 +296,12 @@ pub enum ObservationUnavailable {
 impl fmt::Display for ObservationUnavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotYetReceived => f.write_str("no reading has arrived yet"),
+            Self::NotYetReceived => {
+                f.write_str("a publisher is present but no reading has arrived yet")
+            }
+            Self::SourceUndiscovered => {
+                f.write_str("no publisher for the observation topic was discovered")
+            }
             Self::Stale { age_ms, max_age_ms } => write!(
                 f,
                 "the newest reading is {age_ms} ms old, over the {max_age_ms} ms limit"
@@ -329,6 +343,88 @@ impl PoseKnowledge {
     pub fn is_known(&self) -> bool {
         matches!(self, Self::Known(_))
     }
+}
+
+/// Everything the host knows at the instant an observation is resolved.
+///
+/// # Why this type exists
+///
+/// So the decision it feeds can be tested without ROS, without threads, and
+/// without sleeping. The rule for turning "what has arrived so far" into a
+/// [`WorldObservation`] is ordinary logic with several branches and a
+/// precedence order, and it is exactly the kind of code that is wrong in a way
+/// only a test finds. Behind a subscription it would only ever run on a machine
+/// with a robot attached, and the failure would show up as a demo that says
+/// `UNKNOWN` for reasons nobody can reproduce — which is precisely what
+/// happened.
+///
+/// The adapter's job is reduced to filling these four fields in honestly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObservationSnapshot {
+    /// The newest usable reading, with its age already computed.
+    pub pose: Option<PoseObservation>,
+    /// The failure from the most recent message, when it could not be used.
+    pub last_error: Option<ConversionError>,
+    /// Whether any publisher for the topic has been discovered.
+    pub publisher_seen: bool,
+    /// Whether the observation source is still running.
+    pub source_alive: bool,
+}
+
+impl ObservationSnapshot {
+    /// The snapshot of a host that has just started and heard nothing.
+    pub fn pending() -> Self {
+        Self {
+            pose: None,
+            last_error: None,
+            publisher_seen: false,
+            source_alive: true,
+        }
+    }
+}
+
+/// Turns what the host knows into what the planner is told.
+///
+/// The precedence is deliberate and is the whole content of this function:
+///
+/// ```text
+/// source stopped            -> SourceUnavailable
+/// a reading, within bound   -> Known
+/// a reading, too old        -> Stale
+/// no reading, last was bad  -> Unrepresentable
+/// no reading, no publisher  -> SourceUndiscovered
+/// no reading, publisher up  -> NotYetReceived
+/// ```
+///
+/// A dead source outranks a reading because a reading from a source that has
+/// since stopped is a reading of unknown age from an unknown past. A conversion
+/// failure outranks "nothing yet" because it is the more specific and more
+/// useful statement about the same absence.
+///
+/// No branch produces a position that was not measured.
+pub fn resolve(
+    device: DeviceId,
+    snapshot: ObservationSnapshot,
+    max_age_ms: u64,
+) -> WorldObservation {
+    if !snapshot.source_alive {
+        return WorldObservation::unavailable(device, ObservationUnavailable::SourceUnavailable);
+    }
+    if let Some(pose) = snapshot.pose {
+        return WorldObservation::fresh_within(device, pose, max_age_ms);
+    }
+    if let Some(error) = snapshot.last_error {
+        return WorldObservation::unavailable(
+            device,
+            ObservationUnavailable::Unrepresentable(error),
+        );
+    }
+    let reason = if snapshot.publisher_seen {
+        ObservationUnavailable::NotYetReceived
+    } else {
+        ObservationUnavailable::SourceUndiscovered
+    };
+    WorldObservation::unavailable(device, reason)
 }
 
 /// One machine's observed physical state, as planning context.
