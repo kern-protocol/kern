@@ -62,6 +62,7 @@ pub mod bounds;
 pub mod fake;
 pub mod json;
 pub mod model;
+pub mod observation;
 pub mod parse;
 pub mod plane;
 pub mod prompt;
@@ -74,6 +75,9 @@ pub use json::{Json, JsonError, Number};
 pub use model::{
     ModelIdentity, ModelOutcome, ProposalModel, ProviderFailure, RawModelResponse, ResponseDigest,
     ResponseTooLarge,
+};
+pub use observation::{
+    ConversionError, ObservationUnavailable, PoseKnowledge, PoseObservation, WorldObservation,
 };
 pub use parse::{
     parse_response, ParseError, ParsedModelProposal, ProposedArgument, ProposedValue, NO_ACTION,

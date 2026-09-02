@@ -21,7 +21,7 @@
 //! one source. A model cannot widen the vocabulary by describing a wider one.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -29,6 +29,7 @@ use kern_core::{CapabilityName, DeviceId, ParamDomain, ParamName, Requirement, S
 use kern_policy::CapabilityRegistry;
 
 use crate::bounds::{MAX_INSTRUCTION_BYTES, MAX_ROBOT_CONTEXT_BYTES};
+use crate::observation::WorldObservation;
 
 /// A planning input exceeded a frozen bound, or was empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,6 +289,7 @@ pub struct PlanningRequest {
     vocabulary: CapabilityVocabulary,
     router: crate::proposal::DeviceRouter,
     feedback: ConstraintFeedback,
+    observation: Option<WorldObservation>,
 }
 
 impl PlanningRequest {
@@ -307,6 +309,7 @@ impl PlanningRequest {
             vocabulary,
             router: crate::proposal::DeviceRouter::default(),
             feedback: ConstraintFeedback::default(),
+            observation: None,
         }
     }
 
@@ -330,6 +333,31 @@ impl PlanningRequest {
     pub fn with_feedback(mut self, feedback: ConstraintFeedback) -> Self {
         self.feedback = feedback;
         self
+    }
+
+    /// Attaches what the host currently observes about the machine.
+    ///
+    /// Planning context, and nothing else. The observation is rendered into the
+    /// prompt and is read by nothing downstream: the parser does not see it, the
+    /// evaluator is not given it, and no constraint is relaxed by it. A request
+    /// with an observation and the same request without one produce the same
+    /// policy decision for the same proposal.
+    ///
+    /// Absent by default, which is what every phase before this behaved as.
+    #[must_use]
+    pub fn with_observation(mut self, observation: WorldObservation) -> Self {
+        self.observation = Some(observation);
+        self
+    }
+
+    /// What the host observes, when it observes anything.
+    ///
+    /// `None` means the host supplied no observation at all — which is a
+    /// different statement from an observation whose pose is
+    /// [`Unavailable`](crate::observation::PoseKnowledge::Unavailable), and
+    /// neither of them is a position.
+    pub fn observation(&self) -> Option<&WorldObservation> {
+        self.observation.as_ref()
     }
 
     /// The subject the resulting proposal will be attributed to.
