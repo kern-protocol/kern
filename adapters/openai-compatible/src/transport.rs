@@ -342,3 +342,128 @@ fn push_string(out: &mut String, value: &str) {
     }
     out.push('"');
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A chat-completions envelope carrying `content`, and optionally the
+    /// `reasoning_content` sibling a thinking model emits beside it.
+    fn envelope(content: &str, reasoning: Option<&str>) -> String {
+        let reasoning = reasoning
+            .map(|text| format!(",\"reasoning_content\":\"{text}\""))
+            .unwrap_or_default();
+        format!(
+            "{{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion\",\
+             \"model\":\"nemotron-3-super\",\"choices\":[{{\"index\":0,\
+             \"message\":{{\"role\":\"assistant\",\"content\":\"{content}\"{reasoning}}},\
+             \"finish_reason\":\"stop\"}}],\
+             \"usage\":{{\"prompt_tokens\":900,\"completion_tokens\":64,\"total_tokens\":964}}}}"
+        )
+    }
+
+    #[test]
+    fn the_answer_is_taken_and_the_thinking_is_left_behind() {
+        // `nemotron-3-super` is a thinking model. Kern parses the answer, not
+        // the reasoning: concatenating them would let a model's own narration
+        // become part of the document the parser reads.
+        let body = envelope(
+            "{\\\"capability\\\":\\\"navigate\\\"}",
+            Some("The corridor is clear, so station B is reachable."),
+        );
+        let content = extract_content(&body).expect("a well-formed envelope");
+        let content = String::from_utf8(content).expect("utf-8");
+
+        assert_eq!(content, "{\"capability\":\"navigate\"}");
+        assert!(!content.contains("corridor"));
+    }
+
+    #[test]
+    fn an_envelope_with_no_reasoning_sibling_reads_the_same() {
+        let body = envelope("{\\\"capability\\\":\\\"navigate\\\"}", None);
+        assert_eq!(
+            extract_content(&body).expect("a well-formed envelope"),
+            b"{\"capability\":\"navigate\"}".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_model_that_returned_only_thinking_yields_no_bytes() {
+        // An empty `content` is a model that said nothing, and the proposal
+        // parser refuses it as exactly that.
+        let body = envelope("", Some("I am still considering it."));
+        assert!(extract_content(&body).expect("well-formed").is_empty());
+    }
+
+    #[test]
+    fn a_gateway_error_object_is_a_provider_rejection_and_not_a_denial() {
+        // The distinction the whole failure vocabulary exists for: a gateway
+        // saying no is a configuration fact, never a policy decision.
+        let body = "{\"error\":{\"message\":\"model \\\"nemotron-3-supre\\\" not found\",\
+                    \"type\":\"invalid_request_error\"}}";
+        match extract_content(body) {
+            Err(ProviderFailure::ProviderRejected { detail }) => {
+                assert!(detail.contains("not found"), "got: {detail}");
+            }
+            other => panic!("expected a provider rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_envelope_that_is_not_json_is_a_transport_fault() {
+        // Well-formed HTTP carrying something that is not the documented shape.
+        // Not a denial, not a timeout, and not a proposal.
+        assert!(matches!(
+            extract_content("<html>502 Bad Gateway</html>"),
+            Err(ProviderFailure::TransportUnknown)
+        ));
+    }
+
+    #[test]
+    fn a_missing_choices_array_yields_no_bytes_rather_than_a_guess() {
+        let body = "{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion\",\"choices\":[]}";
+        assert!(extract_content(body).expect("well-formed json").is_empty());
+    }
+
+    #[test]
+    fn an_error_detail_is_bounded_and_stripped_of_control_characters() {
+        let long = "x".repeat(1_000);
+        let body = format!("{{\"error\":{{\"message\":\"{long}\\nsecond line\"}}}}");
+        match extract_content(&body) {
+            Err(ProviderFailure::ProviderRejected { detail }) => {
+                assert!(detail.chars().count() <= 200);
+                assert!(!detail.contains('\n'));
+            }
+            other => panic!("expected a provider rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limiting_and_outages_are_unavailability_not_rejection() {
+        // A key that is out of quota must not read as a model that refused.
+        assert!(matches!(
+            map_error(&ureq::Error::StatusCode(429)),
+            ProviderFailure::Unavailable
+        ));
+        assert!(matches!(
+            map_error(&ureq::Error::StatusCode(503)),
+            ProviderFailure::Unavailable
+        ));
+    }
+
+    #[test]
+    fn a_bad_key_or_a_bad_model_id_is_a_configuration_fault() {
+        // 401: the key is wrong. 404: the model identifier is wrong. Both are
+        // things an operator fixes in configuration, and neither is a fact
+        // about the robot.
+        for code in [400, 401, 403, 404, 422] {
+            assert!(
+                matches!(
+                    map_error(&ureq::Error::StatusCode(code)),
+                    ProviderFailure::ProviderRejected { .. }
+                ),
+                "http {code} should be a provider rejection"
+            );
+        }
+    }
+}

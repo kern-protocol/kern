@@ -29,13 +29,25 @@ pub enum Provider {
     NebiusUsCentral,
     /// Nebius Token Factory, EU West region.
     NebiusEuWest,
-    /// Ollama Cloud's OpenAI-compatible endpoint, called directly.
+    /// Ollama Cloud's OpenAI-compatible endpoint, called directly over HTTPS
+    /// with an `OLLAMA_API_KEY` bearer.
+    ///
+    /// The default, and the path the Phase 7 and Phase 8 demos take: the host
+    /// running the simulator needs no GPU, no local weights, and no `ollama
+    /// serve` daemon, because inference happens in Ollama's account and only
+    /// the completion bytes come back. Nothing above the trust boundary
+    /// notices — those bytes are as untrusted as any other model's, and the
+    /// key never leaves the `Authorization` header.
     OllamaCloud,
     /// A local `ollama serve` daemon's OpenAI-compatible endpoint.
     ///
     /// The daemon may serve local weights or proxy `:cloud` models on its own
     /// credentials, which it holds and Kern never sees. Either way the bytes
     /// that come back are exactly as untrusted as any other model's.
+    ///
+    /// This binds inference to the machine, which is why it is no longer the
+    /// demo default: a simulator host has no reason to also be an inference
+    /// host.
     OllamaLocal,
     /// Any other OpenAI-compatible gateway, with the base URL supplied by
     /// configuration.
@@ -97,11 +109,14 @@ impl FromStr for Provider {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "ollama-cloud" | "ollama-api" | "cloud" => Ok(Self::OllamaCloud),
+            // `ollama` stays bound to the local daemon rather than following
+            // the default. A name that quietly changed which host answered
+            // would be a silent change to where a key is sent.
+            "ollama" | "ollama-local" | "local" => Ok(Self::OllamaLocal),
             "nebius" | "nebius-token-factory" | "token-factory" => Ok(Self::NebiusTokenFactory),
             "nebius-us-central1" | "us-central1" => Ok(Self::NebiusUsCentral),
             "nebius-eu-west1" | "eu-west1" => Ok(Self::NebiusEuWest),
-            "ollama" | "ollama-local" | "local" => Ok(Self::OllamaLocal),
-            "ollama-cloud" => Ok(Self::OllamaCloud),
             "custom" => Ok(Self::Custom),
             _ => Err(UnknownProvider),
         }
@@ -115,8 +130,8 @@ pub struct UnknownProvider;
 impl fmt::Display for UnknownProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(
-            "unknown provider: expected nebius, nebius-us-central1, nebius-eu-west1, \
-             ollama, ollama-cloud, or custom",
+            "unknown provider: expected ollama-cloud, ollama, nebius, \
+             nebius-us-central1, nebius-eu-west1, or custom",
         )
     }
 }

@@ -15,7 +15,9 @@
 
 use std::process::ExitCode;
 
-use kern_model_openai_compatible::{load_dotenv, GatewayConfig, GatewayModel, Provider};
+use kern_model_openai_compatible::{
+    check_key_transport, load_dotenv, GatewayConfig, GatewayModel, Provider,
+};
 
 fn main() -> ExitCode {
     if let Some(path) = load_dotenv(std::env::current_dir().unwrap_or_default()) {
@@ -32,7 +34,7 @@ fn main() -> ExitCode {
         .map(|value| value.parse::<Provider>())
         .transpose();
     let provider = match provider {
-        Ok(provider) => provider.unwrap_or(Provider::NebiusTokenFactory),
+        Ok(provider) => provider.unwrap_or(Provider::OllamaCloud),
         Err(error) => {
             eprintln!("configuration error: {error}");
             return ExitCode::from(2);
@@ -64,7 +66,16 @@ fn main() -> ExitCode {
         }
     };
     let config = match std::env::var("KERN_MODEL_BASE_URL") {
-        Ok(url) if !url.trim().is_empty() => config.with_base_url(url),
+        Ok(url) if !url.trim().is_empty() => {
+            // The same refusal `from_env` makes, made here too: this binary is
+            // where an operator first points a key at a URL, so it is where a
+            // key aimed at a plaintext off-host address should stop.
+            if let Err(error) = check_key_transport("KERN_MODEL_BASE_URL", &url, !key.is_empty()) {
+                eprintln!("configuration error: {error}");
+                return ExitCode::from(2);
+            }
+            config.with_base_url(url)
+        }
         _ => config,
     };
 
@@ -88,17 +99,28 @@ fn main() -> ExitCode {
                 let status = model.status.as_deref().unwrap_or("-");
                 println!("  {:<56}  owner={owner:<16} status={status}", model.id);
             }
-            let candidates: Vec<&str> = models
-                .iter()
-                .map(|model| model.id.as_str())
-                .filter(|id| id.to_ascii_lowercase().contains("nemotron"))
-                .collect();
-            if candidates.is_empty() {
-                println!("\nno model identifier containing `nemotron` is available to this key.");
-            } else {
-                println!("\nnemotron identifiers available to this key:");
-                for id in candidates {
-                    println!("  {id}");
+            // An optional substring filter, because a cloud catalogue is long
+            // and an operator usually arrives with a family in mind. It is a
+            // convenience for reading the list; the list above is the fact.
+            if let Some(needle) = std::env::var("KERN_MODEL_MATCH")
+                .ok()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+            {
+                let candidates: Vec<&str> = models
+                    .iter()
+                    .map(|model| model.id.as_str())
+                    .filter(|id| id.to_ascii_lowercase().contains(&needle))
+                    .collect();
+                if candidates.is_empty() {
+                    println!(
+                        "\nno model identifier containing `{needle}` is available to this key."
+                    );
+                } else {
+                    println!("\nidentifiers containing `{needle}`:");
+                    for id in candidates {
+                        println!("  {id}");
+                    }
                 }
             }
             println!("\nset the chosen one as KERN_MODEL_ID.");

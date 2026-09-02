@@ -82,6 +82,18 @@ pub enum ConfigError {
     },
     /// The provider name was not recognised.
     UnknownProvider(UnknownProvider),
+    /// A bearer credential would be sent over a plaintext connection to a host
+    /// that is not the loopback interface.
+    ///
+    /// The case this exists for is mundane and easy to hit: a configuration
+    /// switched to a cloud provider while an old `KERN_MODEL_BASE_URL` from a
+    /// local-daemon run is still set. The key then goes to whatever that URL
+    /// names, in the clear. Refusing is the only safe reading of that state,
+    /// because the adapter cannot tell an operator's proxy from a mistake.
+    InsecureBaseUrl {
+        /// Which variable supplied the base URL.
+        var: &'static str,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -90,6 +102,12 @@ impl fmt::Display for ConfigError {
             Self::Missing { var, purpose } => write!(f, "{var} is not set ({purpose})"),
             Self::BadValue { var, expected } => write!(f, "{var} must be {expected}"),
             Self::UnknownProvider(error) => write!(f, "{error}"),
+            Self::InsecureBaseUrl { var } => write!(
+                f,
+                "{var} is a plaintext http:// URL to a non-loopback host, and this \
+                 provider sends an API key: use https://, or unset {var} to use the \
+                 provider's own base URL"
+            ),
         }
     }
 }
@@ -145,10 +163,11 @@ impl GatewayConfig {
     /// Reads the configuration from the environment.
     ///
     /// ```text
-    /// KERN_MODEL_PROVIDER         nebius | nebius-us-central1 | nebius-eu-west1
-    ///                             | ollama | custom          (default: nebius)
+    /// KERN_MODEL_PROVIDER         ollama-cloud | ollama | nebius
+    ///                             | nebius-us-central1 | nebius-eu-west1
+    ///                             | custom            (default: ollama-cloud)
+    /// OLLAMA_API_KEY              the key, for ollama-cloud
     /// NEBIUS_API_KEY              the key, for the nebius profiles
-    /// OLLAMA_API_KEY              the key, for the ollama profile
     /// KERN_MODEL_API_KEY          the key, for the custom profile; also
     ///                             overrides the profile's own variable
     /// KERN_MODEL_ID               the model identifier, verified against
@@ -165,12 +184,19 @@ impl GatewayConfig {
     /// id compiled into this crate would be a claim about what an account can
     /// call, and this crate has no way to know that: the identifier must be
     /// verified against `/v1/models` and then configured.
+    ///
+    /// # The base URL override and the key travel together
+    ///
+    /// `KERN_MODEL_BASE_URL` is checked against the key: when a profile sends a
+    /// bearer credential, a plaintext `http://` URL naming anything other than
+    /// the loopback interface is refused rather than dialled. See
+    /// [`ConfigError::InsecureBaseUrl`].
     pub fn from_env() -> Result<Self, ConfigError> {
         let provider = match std::env::var("KERN_MODEL_PROVIDER") {
             Ok(value) => value
                 .parse::<Provider>()
                 .map_err(ConfigError::UnknownProvider)?,
-            Err(_) => Provider::NebiusTokenFactory,
+            Err(_) => Provider::OllamaCloud,
         };
         let profile = provider.profile();
 
@@ -208,6 +234,7 @@ impl GatewayConfig {
                 purpose: "the custom provider has no built-in base URL",
             });
         }
+        check_key_transport("KERN_MODEL_BASE_URL", &base_url, !api_key.trim().is_empty())?;
 
         Ok(Self {
             provider,
@@ -324,6 +351,70 @@ pub const DEFAULT_MAX_TOKENS: u32 = 512;
 /// Low, because this is a structured extraction task rather than a creative one.
 pub const DEFAULT_TEMPERATURE: f32 = 0.2;
 
+/// Refuses to send a bearer credential in the clear to somewhere off-host.
+///
+/// `sending_key` is false when the gateway needs no credential, and then any
+/// URL is acceptable: there is nothing to leak. When it is true, `https://` is
+/// always fine and `http://` is fine only for the loopback interface, where the
+/// request never reaches a network. Everything else — a plaintext URL naming a
+/// LAN address, a container gateway, or a public host — is a configuration that
+/// would put the key on the wire unencrypted, and it is rejected before the
+/// first request rather than after it.
+///
+/// This is exactly the mistake made by switching a working local-daemon setup
+/// over to a cloud provider and leaving the old base URL behind.
+pub fn check_key_transport(
+    var: &'static str,
+    base_url: &str,
+    sending_key: bool,
+) -> Result<(), ConfigError> {
+    if !sending_key {
+        return Ok(());
+    }
+    let lower = base_url.trim().to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("http://") else {
+        // https:// is encrypted; anything else is not a URL this adapter can
+        // dial at all, and the HTTP client will say so in its own terms.
+        return Ok(());
+    };
+    // Authority component only: everything up to the first `/`, `?` or `#`,
+    // with any userinfo, brackets, and port removed.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = match authority.strip_prefix('[') {
+        // A bracketed IPv6 literal: the address is what is inside the brackets,
+        // and any port follows the closing one.
+        Some(inside) => inside.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    let loopback =
+        host == "localhost" || host == "::1" || host == "0:0:0:0:0:0:0:1" || is_ipv4_loopback(host);
+    if loopback {
+        Ok(())
+    } else {
+        Err(ConfigError::InsecureBaseUrl { var })
+    }
+}
+
+/// Whether `host` is a dotted-quad address in `127.0.0.0/8`.
+fn is_ipv4_loopback(host: &str) -> bool {
+    let mut octets = host.split('.');
+    let first = octets.next().unwrap_or_default();
+    if first != "127" {
+        return false;
+    }
+    let rest: Vec<&str> = octets.collect();
+    rest.len() == 3
+        && rest.iter().all(|octet| {
+            !octet.is_empty()
+                && octet.len() <= 3
+                && octet.bytes().all(|byte| byte.is_ascii_digit())
+                && octet.parse::<u16>().is_ok_and(|value| value <= 255)
+        })
+}
+
 fn parse_var<T>(var: &'static str, default: T) -> Result<T, ConfigError>
 where
     T: FromStr,
@@ -338,5 +429,68 @@ where
                 var,
                 expected: "a number",
             }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_gateway_that_needs_no_key_accepts_any_base_url() {
+        assert!(check_key_transport("V", "http://192.168.1.10:11434/v1", false).is_ok());
+    }
+
+    #[test]
+    fn https_carries_a_key_anywhere() {
+        assert!(check_key_transport("V", "https://ollama.com/v1", true).is_ok());
+        assert!(check_key_transport("V", "HTTPS://Ollama.com/v1", true).is_ok());
+    }
+
+    #[test]
+    fn plaintext_loopback_carries_a_key() {
+        for url in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:11434/v1",
+            "http://127.1.2.3/v1",
+            "http://[::1]:11434/v1",
+        ] {
+            assert!(
+                check_key_transport("V", url, true).is_ok(),
+                "expected {url} to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn plaintext_off_host_never_carries_a_key() {
+        // The exact mistake this exists for: a cloud provider selected while a
+        // local-daemon base URL from an earlier run is still set.
+        for url in [
+            "http://host.docker.internal:11434/v1",
+            "http://192.168.1.10:11434/v1",
+            "http://gateway.internal/v1",
+            "http://user:pass@example.com/v1",
+            "http://127.0.0.1.evil.example/v1",
+            "http://1270.0.0.1/v1",
+        ] {
+            assert_eq!(
+                check_key_transport("KERN_MODEL_BASE_URL", url, true),
+                Err(ConfigError::InsecureBaseUrl {
+                    var: "KERN_MODEL_BASE_URL"
+                }),
+                "expected {url} to be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_refusal_names_the_variable_and_prints_no_url() {
+        let message = ConfigError::InsecureBaseUrl {
+            var: "KERN_MODEL_BASE_URL",
+        }
+        .to_string();
+        assert!(message.contains("KERN_MODEL_BASE_URL"));
+        assert!(message.contains("https://"));
     }
 }

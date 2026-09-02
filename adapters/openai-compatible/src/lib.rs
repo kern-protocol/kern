@@ -51,7 +51,7 @@ pub mod env;
 pub mod provider;
 pub mod transport;
 
-pub use config::{ConfigError, GatewayConfig, ResponseFormat};
+pub use config::{check_key_transport, ConfigError, GatewayConfig, ResponseFormat};
 pub use env::load_dotenv;
 pub use provider::{Provider, ProviderProfile};
 pub use transport::{GatewayModel, ListModelsError, ModelEntry};
