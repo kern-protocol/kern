@@ -26,17 +26,38 @@ docker run --rm -e SCENARIO=expiry -e TTL_MS=30000 -e RUN_FOR=100 \
 
 ```bash
 # 4. Phase 7: a live language model in front of the same stack.
-#    The model runs on the host; the container reaches it through
-#    host.docker.internal. Kern sees only the bytes it returns.
+#    The model runs in Ollama Cloud; the container reaches it over HTTPS with
+#    OLLAMA_API_KEY. No GPU, no local weights, no `ollama serve` on the host.
+#    Kern sees only the bytes it returns.
 docker run --rm \
-  -e KERN_MODEL_ID=gpt-oss:120b-cloud \
-  -e KERN_MODEL_BASE_URL=http://host.docker.internal:11434/v1 \
+  -e KERN_MODEL_PROVIDER=ollama-cloud \
+  -e OLLAMA_API_KEY \
+  -e KERN_MODEL_ID=nemotron-3-super \
   -e INSTRUCTION="Take the parcel to station B, gently and carefully." \
   -e TTL_MS=120000 -e RUN_FOR=110 -e SETTLE=10 -e EXPECT=allowed \
-  --add-host=host.docker.internal:host-gateway \
   -v "$PWD":/work -v "$PWD/ros2/kern_nav2_demo/validation":/scratch -w /work \
   kern-sim bash /scratch/stage4_ai_e2e.sh
 ```
+
+`-e OLLAMA_API_KEY` with no value passes the host's variable through without
+writing it into a command line. A key in the repo's gitignored `.env` works too,
+since `$PWD` is mounted at `/work` and the adapter walks up to find it; an
+explicit `-e` wins over the file either way. Get a key at
+<https://ollama.com/settings/keys> and confirm the model identifier first:
+
+```bash
+cd adapters/openai-compatible && cargo run --bin verify
+```
+
+`nemotron-3-super` is a thinking model, so `.env` also sets
+`KERN_MODEL_RESPONSE_FORMAT=json_schema`. Without it, reasoning that lands
+inside the message content makes the response more than one document and the
+parser refuses it — containment holds, but no run gets as far as a goal.
+
+To run against a local `ollama serve` daemon instead, set
+`-e KERN_MODEL_PROVIDER=ollama -e KERN_MODEL_BASE_URL=http://host.docker.internal:11434/v1`
+and add `--add-host=host.docker.internal:host-gateway`. That profile sends no
+bearer at all.
 
 `stage4` knobs: `INSTRUCTION`, `TTL_MS`, `RUN_FOR`, `SETTLE` (seconds of ROS
 discovery time before the goal is prepared — middleware patience, not authority

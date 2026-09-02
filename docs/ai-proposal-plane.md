@@ -243,8 +243,10 @@ is no "retry until policy allows".
 Layers 1–4 are deterministic and offline, and are what `cargo test` runs. No
 ordinary test run touches the network, a credential, ROS, or a simulator.
 
-Layers 5 and 6 were run live for Phase 7 acceptance against an Ollama daemon
-serving `gpt-oss:120b-cloud` over `POST /v1/chat/completions`. The provider is
+Layers 5 and 6 were run live for Phase 7 acceptance against Ollama serving
+`gpt-oss:120b` over `POST /v1/chat/completions` — originally through a local
+daemon, and now by default through Ollama Cloud on an API key, which is the
+same request to a different host. The provider is
 recorded because provenance records it, not because anything decided differently
 on account of it: the same bytes from any other provider produce the same
 decision.

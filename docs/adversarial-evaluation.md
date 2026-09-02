@@ -205,9 +205,8 @@ cargo run --manifest-path evaluation/kern-eval-live/Cargo.toml --bin kern-eval-l
 
 # Mode B, Gazebo. Needs the Phase 6 sim container.
 docker run --rm -e SCENARIOS="allowed denied injection" \
+  -e KERN_MODEL_PROVIDER=ollama-cloud -e OLLAMA_API_KEY \
   -e KERN_MODEL_ID=<verified model id> \
-  -e KERN_MODEL_BASE_URL=http://host.docker.internal:11434/v1 \
-  --add-host=host.docker.internal:host-gateway \
   -v "$PWD":/work -v "$PWD/ros2/kern_nav2_demo/validation":/scratch -w /work \
   kern-sim bash /scratch/stage5_evaluation.sh
 ```

@@ -176,12 +176,16 @@ docker build -t kern-sim -f adapters/nav2-bridge/integration/Dockerfile.sim \
 
 docker run --rm \
   -e SCENARIOS="cafe conveyor arm cafe_denied conveyor_denied arm_denied injection cross concurrent" \
-  -e KERN_MODEL_ID=gpt-oss:120b-cloud \
-  -e KERN_MODEL_BASE_URL=http://host.docker.internal:11434/v1 \
-  --add-host=host.docker.internal:host-gateway \
+  -e KERN_MODEL_PROVIDER=ollama-cloud \
+  -e OLLAMA_API_KEY \
+  -e KERN_MODEL_ID=nemotron-3-super \
   -v "$PWD":/work -v "$PWD/ros2/kern_nav2_demo/validation":/scratch -w /work \
   kern-sim bash /scratch/stage6_heterogeneous.sh
 ```
+
+The model runs in Ollama Cloud over HTTPS; `-e OLLAMA_API_KEY` passes the host's
+key through without putting it on a command line. The container needs outbound
+HTTPS and nothing else — no GPU, no weights, no local daemon.
 
 Long scenarios are better run a few at a time: each brings the whole stack up
 once, and `concurrent` needs the corridor clear.
