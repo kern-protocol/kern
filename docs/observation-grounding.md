@@ -197,6 +197,43 @@ deciding how old a pose reading is — and no crate that decides authority
 (`kern-core`, `kern-authority`, `kern-enforcer`, `kern-execution`) depends on
 `kern-ai` at all, which a test asserts against their manifests.
 
+## One subscription, not two
+
+An earlier version opened two subscriptions on one node — transient-local to
+receive a publisher's retained sample, volatile to stay compatible with a
+publisher offering none. On the live stack the observer then froze on a single
+57-second-old reading while an independent subscriber on the same machine
+received poses 12–33 ms old, continuously, from the same topic.
+
+Two readers for one topic on one node is not a construct this adapter can
+justify from first principles, and its delivery behaviour cannot be verified
+without a robot attached. It is gone.
+
+One subscription suffices, because the asymmetry runs the useful way: **a
+transient-local subscriber matched to a transient-local publisher receives the
+retained sample *and* every live sample afterwards.** Retained delivery and live
+delivery were never two requirements. Only against a publisher offering volatile
+durability does it fail to match, and that is a configuration the host can be
+told about — `--pose-durability volatile`.
+
+Nav2's AMCL advertises `RELIABLE`/`TRANSIENT_LOCAL`, measured on the live stack,
+so the default is correct there.
+
+### Counting deliveries
+
+The observer reports what its ledger did:
+
+```text
+deliveries: 431 (accepted 118, duplicate 0, superseded 313)
+```
+
+From outside a process, "the sample never arrived" and "the sample arrived and
+was rejected" look identical — which is most of why the failure above took a
+live reproduction to find. `deliveries: 0` and `superseded: 313` are different
+bugs with different fixes, and the transcript now distinguishes them. When a
+publisher exists and nothing was delivered, the demo says so and names the
+volatile-publisher case as the likely reason.
+
 ## Identity, duplicates, and ordering
 
 The two subscriptions mean the same sample routinely arrives twice. A source
@@ -216,6 +253,7 @@ younger.
 | | |
 |---|---|
 | topic | `/amcl_pose` (`geometry_msgs/PoseWithCovarianceStamped`), configurable |
+| durability | `TRANSIENT_LOCAL` by default; `--pose-durability volatile` for a volatile publisher |
 | why not `/odom` | `/odom` drifts without bound and is in a different frame; the demo's named places are map-frame, so an odometry reading compared against a map-frame destination compares two different things |
 | distance | metres → millimetres, ×1000 |
 | angle | quaternion → yaw radians → millidegrees, ×(180000/π) |
@@ -331,6 +369,16 @@ kern-ai-demo --no-observe
   creates no action client until policy has authorized something, and the
   observation is needed strictly earlier. It is started once per process, not per
   inference.
+
+## The Gazebo clock bridge
+
+Gazebo publishes simulated time on a **world-scoped** topic,
+`/world/<world name>/clock`. The launch files bridged a bare `/clock`, which
+matched nothing, so ROS `/clock` was silent and every `use_sim_time` consumer —
+Nav2 and this observer among them — had no simulated clock at all. Both launch
+files now bridge the world-scoped topic and remap it onto `/clock`, with the
+world name tracking the world each file actually starts. No manual bridge is
+needed.
 
 ## Live validation status
 
