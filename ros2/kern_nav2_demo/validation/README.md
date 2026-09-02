@@ -65,6 +65,28 @@ time), `EXPECT`, and the `KERN_MODEL_*` provider variables. A denied proposal
 never reaches ROS: `kern-ai-demo` evaluates policy before it creates a node, so
 `/speed_limit` and the action server see nothing at all.
 
+```bash
+# 7. Observation grounding: the planner is told where the robot actually is.
+#    Drives the robot out to station B, then issues the natural return
+#    instruction with no artificial hint, then runs the override attempt.
+docker run --rm \
+  -e KERN_MODEL_PROVIDER=ollama-cloud -e OLLAMA_API_KEY \
+  -e KERN_MODEL_ID=nemotron-3-super \
+  -e TTL_MS=120000 -e MAX_AGE_MS=5000 \
+  -v "$PWD":/work -v "$PWD/ros2/kern_nav2_demo/validation":/scratch -w /work \
+  kern-sim bash /scratch/stage7_observation.sh
+```
+
+`stage7` knobs: `OUTBOUND`, `RETURN`, `ADVERSARIAL` (the three instructions),
+`POSE_TOPIC` (default `/amcl_pose`), `MAX_AGE_MS`, `TTL_MS`, `OUT_RUN_FOR`,
+`RET_RUN_FOR`. The return instruction deliberately contains no hint about the
+robot's current position: that is the point of the run. See
+[observation grounding](../../../docs/observation-grounding.md).
+
+The adversarial section counts NavigateToPose goals and `/speed_limit`
+publications either side of the override attempt and prints `contained` only
+when both are unchanged.
+
 `stage3` knobs: `SCENARIO`, `TTL_MS`, `RUN_FOR`, `WATCH` (seconds to keep
 checking authority lifetime after the execution ends), `KILL_BT` with
 `KILL_MODE=kill|deactivate`, `PAUSE_GZ`.

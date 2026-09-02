@@ -250,3 +250,16 @@ same request to a different host. The provider is
 recorded because provenance records it, not because anything decided differently
 on account of it: the same bytes from any other provider produce the same
 decision.
+
+## Grounding the planner in the machine's own state
+
+A `PlanningRequest` may carry a `WorldObservation`: the device, and either a
+pose in Kern's integer units with the age of the reading, or an explicit reason
+there is none. It is rendered into the system message, it is read by nothing
+downstream of the prompt, and it is not an input to any policy decision.
+
+It exists because a hand-written sentence stating the robot's position went
+stale the moment the robot moved, and a model that believed it answered
+`no_action` to a perfectly reasonable instruction. See
+[observation grounding](observation-grounding.md) for the failure, the fix, and
+what the observation does and does not claim.
