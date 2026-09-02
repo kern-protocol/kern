@@ -6,8 +6,8 @@
 #   RUN_FOR       seconds to keep observing the execution
 #   EXPECT        allowed | denied  (what this run is being kept as evidence of)
 #
-# The model runs on the host; the container reaches it through
-# host.docker.internal. Kern sees only the bytes it returns.
+# The model runs in Ollama Cloud, reached over HTTPS with OLLAMA_API_KEY.
+# Kern sees only the bytes it returns.
 . /opt/ros/jazzy/setup.sh
 mkdir -p /ws/src && cp -r /work/ros2/kern_nav2_demo /ws/src/ 2>/dev/null
 cd /ws && colcon build --packages-select kern_nav2_demo > /tmp/colcon.log 2>&1
@@ -17,9 +17,28 @@ export PATH=/root/.cargo/bin:$PATH
 export CARGO_TARGET_DIR=/tmp/target
 export IDL_PACKAGE_FILTER="builtin_interfaces;std_msgs;geometry_msgs;action_msgs;unique_identifier_msgs;nav_msgs;geographic_msgs;nav2_msgs"
 
-# The provider: the operator's own Ollama daemon, on the host.
-export KERN_MODEL_PROVIDER="${KERN_MODEL_PROVIDER:-ollama}"
-export KERN_MODEL_BASE_URL="${KERN_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}"
+# The provider: Ollama Cloud, over HTTPS, on an API key. Inference happens in
+# Ollama's account, so this container needs no GPU, no model weights, and no
+# `ollama serve` daemon on the host — only outbound HTTPS and DNS.
+#
+# The key arrives from the host as an environment variable (`docker run -e
+# OLLAMA_API_KEY`), is never written to a file in the image, and goes into one
+# Authorization header. It is not logged and not recorded in provenance.
+export KERN_MODEL_PROVIDER="${KERN_MODEL_PROVIDER:-ollama-cloud}"
+
+# No default base URL. The provider profile supplies https://ollama.com/v1, and
+# a default set here would be the one that survives a switch back to the cloud
+# and quietly aims the cloud key at a stale local address.
+if [ -n "${KERN_MODEL_BASE_URL:-}" ]; then
+  export KERN_MODEL_BASE_URL
+fi
+
+case "$KERN_MODEL_PROVIDER" in
+  ollama-cloud|ollama-api|cloud)
+    : "${OLLAMA_API_KEY:?set OLLAMA_API_KEY to an Ollama Cloud API key (docker run -e OLLAMA_API_KEY)}"
+    export OLLAMA_API_KEY
+    ;;
+esac
 export KERN_MODEL_ID="${KERN_MODEL_ID:?set KERN_MODEL_ID to a verified model identifier}"
 
 cd /work/adapters/nav2-bridge && cargo build --bin kern-ai-demo 2>&1 | tail -6
