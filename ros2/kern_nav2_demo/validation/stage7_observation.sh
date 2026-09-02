@@ -20,9 +20,11 @@ cd /ws && colcon build --packages-select kern_nav2_demo > /tmp/colcon.log 2>&1
 export GZ_SIM_RESOURCE_PATH=/ws/install/kern_nav2_demo/share/kern_nav2_demo/worlds
 export PATH=/root/.cargo/bin:$PATH
 export CARGO_TARGET_DIR=/tmp/target
-# rosgraph_msgs is required: the observer subscribes to /clock to establish
-# the time domain that /amcl_pose header stamps are written in.
-export IDL_PACKAGE_FILTER="builtin_interfaces;std_msgs;geometry_msgs;action_msgs;unique_identifier_msgs;nav_msgs;geographic_msgs;nav2_msgs;rosgraph_msgs"
+# rosgraph_msgs: the observer subscribes to /clock to establish the time domain
+# that /amcl_pose header stamps are written in.
+# std_srvs: the observer calls /request_nomotion_update, because AMCL publishes
+# on filter update and a stationary robot produces none.
+export IDL_PACKAGE_FILTER="builtin_interfaces;std_msgs;geometry_msgs;action_msgs;unique_identifier_msgs;nav_msgs;geographic_msgs;nav2_msgs;rosgraph_msgs;std_srvs"
 
 export KERN_MODEL_PROVIDER="${KERN_MODEL_PROVIDER:-ollama-cloud}"
 if [ -n "${KERN_MODEL_BASE_URL:-}" ]; then

@@ -263,14 +263,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let readiness = observer.await_first(options.observe_wait);
                 println!("  {readiness}");
                 let (deliveries, accepted, duplicates, superseded) = observer.delivery_counts();
+                let (asked, answered) = observer.nomotion_counts();
                 println!(
                     "  deliveries: {deliveries} (accepted {accepted}, duplicate {duplicates}, \
                      superseded {superseded})"
                 );
+                println!("  no-motion updates: requested {asked}, answered {answered}");
                 if !observer.publisher_seen() {
                     println!(
                         "  hint: nothing publishes {topic}. Check that the localizer is \
                          running, or pass --pose-topic."
+                    );
+                } else if deliveries <= 1 && answered == 0 && asked > 0 {
+                    println!(
+                        "  hint: the localizer published nothing new and did not answer a \
+                         no-motion update. AMCL publishes on filter update, so a stationary \
+                         robot produces none. Check `ros2 service list | grep nomotion` and \
+                         that /amcl is lifecycle-active."
                     );
                 } else if deliveries == 0 {
                     println!(

@@ -10,12 +10,23 @@
 //! as a claim about a check. An observation is needed strictly earlier, before
 //! inference, so it needs a node that exists earlier.
 //!
-//! So this is a second node, and a deliberately impoverished one: **one
-//! subscription and nothing else**. No action client, no publisher, no service,
-//! no parameter. It can read a topic and it can do nothing else, which keeps the
-//! denied-path property intact in precise terms — a refused proposal still
-//! cannot publish a speed limit or send a goal, because at the moment of refusal
-//! there is still no publisher and no action client anywhere in the process.
+//! So this is a second node, and a deliberately impoverished one: two
+//! subscriptions and one service client. No publisher, no action client, no
+//! parameter server.
+//!
+//! The service client is `/request_nomotion_update`, and it is worth being exact
+//! about rather than glossing. AMCL publishes on filter update, so a stationary
+//! robot produces no pose at all, and an observer that only listens waits out
+//! its deadline and reports the retained sample as stale — honest, and useless.
+//! The service asks the localizer to run an update over data it already holds.
+//! It carries `std_srvs/srv/Empty` in both directions, reaches no action server,
+//! no velocity topic and no controller, and cannot move the machine.
+//!
+//! It is therefore **not** true that this node can only read, and this module no
+//! longer says so. What remains true is the property the claim was protecting: a
+//! refused proposal still cannot publish a speed limit or send a goal, because
+//! at the moment of refusal there is no publisher and no action client anywhere
+//! in the process.
 //!
 //! It is started once and retained for the life of the process. It is not
 //! created per inference.
@@ -35,7 +46,7 @@
 //! since. The age accompanies every reading for exactly that reason.
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -45,6 +56,7 @@ use futures::future::FutureExt;
 use futures::stream::StreamExt;
 use r2r::geometry_msgs::msg::PoseWithCovarianceStamped;
 use r2r::rosgraph_msgs::msg::Clock as ClockMsg;
+use r2r::std_srvs::srv::Empty;
 use r2r::{Context, Node, QosProfile};
 
 use kern_ai::observation::{
@@ -77,6 +89,27 @@ const CLOCK_SAMPLE_MAX_AGE: Duration = Duration::from_millis(2_000);
 /// wall time, so this separates the two domains with an enormous margin rather
 /// than a fine judgement.
 const WALL_CLOCK_TOLERANCE: Duration = Duration::from_secs(60 * 60 * 24 * 30);
+
+/// The AMCL service that asks for a localization update with no motion.
+///
+/// `std_srvs/srv/Empty`: it carries no data in either direction.
+pub const DEFAULT_NOMOTION_SERVICE: &str = "/request_nomotion_update";
+
+/// How long to wait for the service to appear before giving up on it.
+const SERVICE_WAIT: Duration = Duration::from_millis(1_000);
+
+/// How long one service call may take before it is abandoned.
+const SERVICE_BUDGET: Duration = Duration::from_millis(1_000);
+
+/// How often to ask AMCL to recompute while there is no usable pose.
+const NOMOTION_INTERVAL: Duration = Duration::from_millis(1_500);
+
+/// How many times to ask before concluding it is not going to help.
+///
+/// Bounded because this is a request to another node, and an observer that
+/// cannot get a pose must become quiet rather than hammer the graph for the
+/// life of the process.
+const NOMOTION_MAX_ATTEMPTS: u32 = 8;
 
 /// How often to ask the graph whether anyone publishes the topic.
 const GRAPH_CHECK_INTERVAL: Duration = Duration::from_millis(250);
@@ -200,6 +233,8 @@ pub struct PoseObserverConfig {
     pub clock_topic: String,
     /// Which durability the pose subscription requests.
     pub durability: PoseDurability,
+    /// The AMCL no-motion update service, or `None` to never call it.
+    pub nomotion_service: Option<String>,
 }
 
 impl Default for PoseObserverConfig {
@@ -211,6 +246,7 @@ impl Default for PoseObserverConfig {
             max_age_ms: DEFAULT_MAX_AGE_MS,
             clock_topic: String::from(DEFAULT_CLOCK_TOPIC),
             durability: PoseDurability::TransientLocal,
+            nomotion_service: Some(String::from(DEFAULT_NOMOTION_SERVICE)),
         }
     }
 }
@@ -228,6 +264,10 @@ struct Shared {
     ledger: Mutex<PoseLedger>,
     /// When the observer started, so a receipt instant can be plain millis.
     started: Instant,
+    /// The pose topic, for graph queries and diagnostics.
+    topic: String,
+    /// The oldest reading this host will plan on.
+    max_age_ms: u64,
     /// The most recent conversion failure, if the newest message was unusable.
     ///
     /// Kept apart from the ledger so an unusable message does not erase a good
@@ -246,6 +286,11 @@ struct Shared {
     ros_clock: Mutex<Option<(SourceTime, Instant)>>,
     /// Why the newest reading's age could not be established, if it could not.
     age_error: Mutex<Option<SourceAgeError>>,
+    /// How many no-motion updates were requested, and how many were answered.
+    nomotion_requested: AtomicU32,
+    nomotion_answered: AtomicU32,
+    /// True once the no-motion service has been found on the graph.
+    nomotion_available: AtomicBool,
     /// True once any publisher for the topic has been seen on the graph.
     ///
     /// Latching rather than instantaneous: a publisher that appeared and went
@@ -286,9 +331,14 @@ impl PoseObserver {
         let shared = Arc::new(Shared {
             ledger: Mutex::new(PoseLedger::new()),
             started: Instant::now(),
+            topic: config.topic.clone(),
+            max_age_ms: config.max_age_ms,
             last_error: Mutex::new(None),
             ros_clock: Mutex::new(None),
             age_error: Mutex::new(None),
+            nomotion_requested: AtomicU32::new(0),
+            nomotion_answered: AtomicU32::new(0),
+            nomotion_available: AtomicBool::new(false),
             alive: AtomicBool::new(true),
             publisher_seen: AtomicBool::new(false),
         });
@@ -307,7 +357,7 @@ impl PoseObserver {
                 // a stale reading looking live: the thread is marked dead and
                 // every later observation says the source is unavailable.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let (mut node, poses, clock) = match Context::create()
+                    let (mut node, poses, clock, nomotion) = match Context::create()
                         .and_then(|context| {
                             Node::create(context, &config.node_name, &config.namespace)
                         })
@@ -341,7 +391,17 @@ impl PoseObserver {
                                 &config.clock_topic,
                                 QosProfile::default(),
                             )?;
-                            Ok((node, poses, clock))
+                            // The one thing this node can do besides listen.
+                            // See `request_nomotion_update` for what it is and
+                            // why it does not make the observer an actuator.
+                            let nomotion = match &config.nomotion_service {
+                                Some(name) => Some(node.create_client::<Empty::Service>(
+                                    name,
+                                    QosProfile::services_default(),
+                                )?),
+                                None => None,
+                            };
+                            Ok((node, poses, clock, nomotion))
                         }) {
                         Ok(parts) => {
                             let _ = ready_tx.send(Ok(()));
@@ -356,7 +416,7 @@ impl PoseObserver {
                         &mut node,
                         Box::pin(poses),
                         Box::pin(clock),
-                        &config.topic,
+                        nomotion.as_ref(),
                         &thread_shared,
                         &thread_stop,
                     );
@@ -412,7 +472,7 @@ impl PoseObserver {
             .lock()
             .ok()
             .and_then(|guard| guard.held());
-        let clock = self.source_clock(held.map(|(_, stamp, _)| stamp));
+        let clock = source_clock(&self.shared, held.map(|(_, stamp, _)| stamp));
         let now_ms = self
             .shared
             .started
@@ -453,6 +513,17 @@ impl PoseObserver {
         }
     }
 
+    /// No-motion updates requested, and how many the service answered.
+    ///
+    /// Diagnostic only. An answered request is not a pose and is never treated
+    /// as one; it only says the localizer was asked to publish.
+    pub fn nomotion_counts(&self) -> (u32, u32) {
+        (
+            self.shared.nomotion_requested.load(Ordering::SeqCst),
+            self.shared.nomotion_answered.load(Ordering::SeqCst),
+        )
+    }
+
     /// What the ledger has seen: deliveries, accepted, duplicates, superseded.
     ///
     /// For the demo banner and for a bug report. A transcript that says "stale
@@ -471,49 +542,6 @@ impl PoseObserver {
                 )
             })
             .unwrap_or((0, 0, 0, 0))
-    }
-
-    /// A current time in the same domain `stamp` was written in, if one exists.
-    ///
-    /// Two domains are recognised, and never mixed:
-    ///
-    /// - **Simulated.** Something publishes `/clock`. That value *is* the
-    ///   domain every node in the graph stamps in, so it is used directly and
-    ///   never extrapolated with host elapsed time. A sample older than
-    ///   [`CLOCK_SAMPLE_MAX_AGE`] means the simulator stopped publishing —
-    ///   paused, most likely — and the simulated present is then unknown.
-    /// - **Wall clock.** Nothing has ever published `/clock`, so the stack runs
-    ///   on real time and message stamps are epoch-based. The host's own wall
-    ///   clock is then the same domain, subject to a sanity check that the
-    ///   stamp is anywhere near it.
-    ///
-    /// Anything else is [`SourceClock::Unavailable`], which costs an
-    /// observation and never produces a wrong age.
-    fn source_clock(&self, stamp: Option<SourceTime>) -> SourceClock {
-        let sample = self.shared.ros_clock.lock().ok().and_then(|guard| *guard);
-        if let Some((simulated, received)) = sample {
-            return if received.elapsed() <= CLOCK_SAMPLE_MAX_AGE {
-                SourceClock::Established(simulated)
-            } else {
-                SourceClock::Unavailable
-            };
-        }
-
-        // Nothing has ever published `/clock`. Wall-clock domain, if the stamp
-        // is plausibly in it.
-        let Some(stamp) = stamp else {
-            return SourceClock::Unavailable;
-        };
-        let Ok(epoch) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-            return SourceClock::Unavailable;
-        };
-        let wall = SourceTime::from_nanos(epoch.as_nanos() as i128);
-        let distance = (wall.nanos() - stamp.nanos()).unsigned_abs();
-        if distance <= WALL_CLOCK_TOLERANCE.as_nanos() {
-            SourceClock::Established(wall)
-        } else {
-            SourceClock::Unavailable
-        }
     }
 
     /// The freshness bound this observer applies.
@@ -620,11 +648,13 @@ fn run(
     node: &mut Node,
     mut poses: Pin<Box<impl futures::Stream<Item = PoseWithCovarianceStamped> + ?Sized>>,
     mut clock: Pin<Box<impl futures::Stream<Item = ClockMsg> + ?Sized>>,
-    topic: &str,
+    nomotion: Option<&r2r::Client<Empty::Service>>,
     shared: &Arc<Shared>,
     stop: &Arc<AtomicBool>,
 ) {
     let mut last_graph_check = Instant::now() - GRAPH_CHECK_INTERVAL;
+    // Nudge promptly on startup rather than after a first idle interval.
+    let mut last_nomotion = Instant::now() - NOMOTION_INTERVAL;
     while !stop.load(Ordering::SeqCst) {
         node.spin_once(SPIN_SLICE);
 
@@ -634,7 +664,7 @@ fn run(
         if last_graph_check.elapsed() >= GRAPH_CHECK_INTERVAL
             && !shared.publisher_seen.load(Ordering::SeqCst)
         {
-            if let Ok(publishers) = node.get_publishers_info_by_topic(topic, false) {
+            if let Ok(publishers) = node.get_publishers_info_by_topic(&shared.topic, false) {
                 if !publishers.is_empty() {
                     shared.publisher_seen.store(true, Ordering::SeqCst);
                 }
@@ -652,6 +682,157 @@ fn run(
         if !drain(&mut poses, shared) {
             return;
         }
+
+        // AMCL publishes on filter update. A stationary robot produces no
+        // update, so a host that only listens waits out its deadline and
+        // correctly reports the retained sample as stale — honest, and useless.
+        // Asking for a no-motion update makes the source produce a current
+        // estimate. Only while there is nothing usable, rate-limited, bounded.
+        if let Some(client) = nomotion {
+            if last_nomotion.elapsed() >= NOMOTION_INTERVAL
+                && shared.nomotion_requested.load(Ordering::SeqCst) < NOMOTION_MAX_ATTEMPTS
+                && needs_refresh(shared)
+            {
+                request_nomotion_update(node, client, shared);
+                last_nomotion = Instant::now();
+            }
+        }
+    }
+}
+
+/// A current time in the same domain `stamp` was written in, if one exists.
+///
+/// Two domains are recognised, and never mixed:
+///
+/// - **Simulated.** Something publishes `/clock`. That value *is* the
+///   domain every node in the graph stamps in, so it is used directly and
+///   never extrapolated with host elapsed time. A sample older than
+///   [`CLOCK_SAMPLE_MAX_AGE`] means the simulator stopped publishing —
+///   paused, most likely — and the simulated present is then unknown.
+/// - **Wall clock.** Nothing has ever published `/clock`, so the stack runs
+///   on real time and message stamps are epoch-based. The host's own wall
+///   clock is then the same domain, subject to a sanity check that the
+///   stamp is anywhere near it.
+///
+/// Anything else is [`SourceClock::Unavailable`], which costs an
+/// observation and never produces a wrong age.
+fn source_clock(shared: &Arc<Shared>, stamp: Option<SourceTime>) -> SourceClock {
+    let sample = shared.ros_clock.lock().ok().and_then(|guard| *guard);
+    if let Some((simulated, received)) = sample {
+        return if received.elapsed() <= CLOCK_SAMPLE_MAX_AGE {
+            SourceClock::Established(simulated)
+        } else {
+            SourceClock::Unavailable
+        };
+    }
+
+    // Nothing has ever published `/clock`. Wall-clock domain, if the stamp
+    // is plausibly in it.
+    let Some(stamp) = stamp else {
+        return SourceClock::Unavailable;
+    };
+    let Ok(epoch) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return SourceClock::Unavailable;
+    };
+    let wall = SourceTime::from_nanos(epoch.as_nanos() as i128);
+    let distance = (wall.nanos() - stamp.nanos()).unsigned_abs();
+    if distance <= WALL_CLOCK_TOLERANCE.as_nanos() {
+        SourceClock::Established(wall)
+    } else {
+        SourceClock::Unavailable
+    }
+}
+
+/// Whether the host currently lacks a pose it would plan on.
+///
+/// The same rule the planner is shown, asked on the observer thread: no reading,
+/// a reading too old, or a reading whose age cannot be established. Anything
+/// else, and there is nothing to ask AMCL for.
+fn needs_refresh(shared: &Arc<Shared>) -> bool {
+    let Some((_, stamp, received_ms)) = shared.ledger.lock().ok().and_then(|guard| guard.held())
+    else {
+        return true;
+    };
+    let now_ms = shared.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let clock = source_clock(shared, Some(stamp));
+    match observation_age_ms(stamp, clock, now_ms.saturating_sub(received_ms)) {
+        Ok(age_ms) => age_ms > shared.max_age_ms,
+        Err(_) => true,
+    }
+}
+
+/// Asks AMCL to recompute its estimate without the robot having moved.
+///
+/// # Advisory, and not pose data
+///
+/// The request is `std_srvs/srv/Empty`: no data out, none back. Nothing in the
+/// response is read and nothing about it is trusted. A reply is not evidence
+/// that a pose exists — it is a hint to another node that now would be a good
+/// time to publish one. The only thing this host ever treats as an observation
+/// is an `/amcl_pose` message arriving afterwards, which survives the same
+/// source-stamp, clock-domain, and freshness rules as any other message.
+///
+/// If the service is absent, the call fails, or nothing is published in
+/// response, the observation stays `UNKNOWN`. The time of the request is never
+/// used as the time of a pose, and no timestamp is ever rewritten.
+///
+/// # Why this does not make the observer an actuator
+///
+/// One client, one named service, an empty message, whose documented effect is
+/// that a localization filter runs an update over data it already holds. It
+/// reaches no action server, no velocity topic, and no controller, and it
+/// cannot move the machine. That is a much weaker capability than publishing,
+/// but it is not nothing — which is why the module documentation no longer says
+/// this node can only read.
+fn request_nomotion_update(
+    node: &mut Node,
+    client: &r2r::Client<Empty::Service>,
+    shared: &Arc<Shared>,
+) {
+    if !shared.nomotion_available.load(Ordering::SeqCst) {
+        let Ok(waiting) = Node::is_available(client) else {
+            return;
+        };
+        let mut waiting = Box::pin(waiting);
+        if !matches!(
+            await_with_spin(node, &mut waiting, SERVICE_WAIT),
+            Some(Ok(()))
+        ) {
+            // Not there. Counted as an attempt, so a missing service cannot
+            // keep this loop retrying for the life of the process.
+            shared.nomotion_requested.fetch_add(1, Ordering::SeqCst);
+            return;
+        }
+        shared.nomotion_available.store(true, Ordering::SeqCst);
+    }
+
+    shared.nomotion_requested.fetch_add(1, Ordering::SeqCst);
+    let Ok(pending) = client.request(&Empty::Request {}) else {
+        return;
+    };
+    let mut pending = Box::pin(pending);
+    if await_with_spin(node, &mut pending, SERVICE_BUDGET).is_some() {
+        // The service answered. That is all it means: no pose has been observed
+        // yet, and one may never arrive.
+        shared.nomotion_answered.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Polls a future while spinning the node, up to a budget.
+fn await_with_spin<F: core::future::Future + Unpin>(
+    node: &mut Node,
+    future: &mut F,
+    budget: Duration,
+) -> Option<F::Output> {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Some(output) = future.now_or_never() {
+            return Some(output);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        node.spin_once(SPIN_SLICE);
     }
 }
 
