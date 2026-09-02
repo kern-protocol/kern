@@ -33,6 +33,9 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    # The world this launch file starts. Part of Gazebo's clock topic name.
+    WORLD_NAME = "kern_workspace"
+
     package = get_package_share_directory("kern_nav2_demo")
     world = os.path.join(package, "worlds", "kern_workspace.sdf")
     params = os.path.join(package, "params", "kern_nav2_params.yaml")
@@ -65,7 +68,13 @@ def generate_launch_description():
         name="ros_gz_bridge",
         output="screen",
         arguments=[
-            "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
+            # Gazebo publishes simulated time on the world-scoped topic, not on a
+            # bare `/clock`. Bridging `/clock` on its own matched nothing, so ROS
+            # `/clock` stayed silent and every `use_sim_time` consumer — Nav2 and
+            # Kern's pose observer among them — had no simulated clock at all.
+            # The world name is part of the topic, so it must track the world
+            # this launch file actually starts.
+            f"/world/{WORLD_NAME}/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
             "/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
             "/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
             "/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
@@ -82,6 +91,8 @@ def generate_launch_description():
             "/robotic_arm_01/joint_state@sensor_msgs/msg/JointState[gz.msgs.Model",
         ],
         parameters=[{"use_sim_time": True}],
+        # Consumers read `/clock`; Gazebo names it per world.
+        remappings=[(f"/world/{WORLD_NAME}/clock", "/clock")],
     )
 
     # The lidar's frame, as Gazebo names it. `robot_state_publisher` is
