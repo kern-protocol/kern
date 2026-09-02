@@ -151,11 +151,48 @@ The freshness default is generous because AMCL publishes on update rather than o
 a timer. A stationary, well-localized robot can legitimately go seconds without a
 new message, and that is exactly the moment somebody asks it to move.
 
+## The QoS trap
+
+The first live run on the VM reported `position: UNKNOWN (no reading has arrived
+yet)` while `/amcl_pose` was demonstrably publishing and
+`ros2 topic echo /amcl_pose --once` returned instantly.
+
+That instant return is the clue. AMCL publishes `amcl_pose` on filter update, not
+on a timer. A robot sitting at its spawn point has produced one pose, some time
+ago, and the publisher **retains** it — `ros2 topic echo` auto-negotiates the
+publisher's QoS and is handed the retained sample, so it appears to return
+immediately from a live stream. It is not a live stream; it is a recording.
+
+A `VOLATILE` subscriber is fully *compatible* with a `TRANSIENT_LOCAL` publisher.
+It matches, it reports no error, and it is never given the retained sample — it
+receives only what is published after matching. On a stationary robot that is
+nothing, forever. The subscription was healthy and empty, which is the worst
+combination to debug because every individual check passes.
+
+The fix is two subscriptions on one node:
+
+| | publisher `TRANSIENT_LOCAL` | publisher `VOLATILE` |
+|---|---|---|
+| subscriber `TRANSIENT_LOCAL` | matches, **gets the retained sample** | incompatible, matches nothing |
+| subscriber `VOLATILE` | matches, future messages only | matches, future messages only |
+
+Neither column is safe alone. `TRANSIENT_LOCAL` alone goes blind against a
+volatile publisher; `VOLATILE` alone is the bug above. Both together cover the
+grid, and redundancy is harmless here — the worst a duplicate delivery does is
+hand over the same reading twice, and the newest wins.
+
+The observer also watches the graph with `get_publishers_info_by_topic`, so
+"nobody is publishing this topic" (`SourceUndiscovered`) is reported as a
+different fact from "a publisher exists and has sent nothing"
+(`NotYetReceived`). The original message could not tell those apart, which is
+most of why the cause was not obvious from the transcript.
+
 ## Failure behaviour
 
 | condition | result |
 |---|---|
-| no reading yet | `Unavailable(NotYetReceived)` |
+| no publisher discovered | `Unavailable(SourceUndiscovered)` |
+| publisher present, nothing sent | `Unavailable(NotYetReceived)` |
 | reading older than the bound | `Unavailable(Stale { age_ms, max_age_ms })` |
 | NaN | `Unavailable(Unrepresentable(NotANumber))` |
 | ±infinity | `Unavailable(Unrepresentable(Infinite))` |
