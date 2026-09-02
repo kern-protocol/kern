@@ -29,8 +29,9 @@
 use std::time::{Duration, Instant};
 
 use kern_ai::{
-    render_proposal, CapabilityVocabulary, Instruction, NormalizationOutcome, PlanningRequest,
-    PolicyOutcome, ProposalPlane, RobotContext, SequentialProposalIds,
+    render_proposal, CapabilityVocabulary, Instruction, NormalizationOutcome,
+    ObservationUnavailable, PlanningRequest, PolicyOutcome, ProposalPlane, RobotContext,
+    SequentialProposalIds, WorldObservation,
 };
 use kern_authority::{
     AuthorizedOperation, CountingNonces, Ed25519Signer, LeaseIssuer, SequentialLeaseIds,
@@ -50,7 +51,11 @@ use kern_execution_nav2::{
     DESTINATION_Y_MM, MAX_SPEED_MM_S, NAVIGATE, YAW_MDEG,
 };
 use kern_model_openai_compatible::{load_dotenv, GatewayConfig, GatewayModel};
-use kern_nav2_bridge::{ros::BridgeConfig, RosNav2Backend};
+use kern_nav2_bridge::{
+    pose::{PoseObserver, PoseObserverConfig, DEFAULT_MAX_AGE_MS, DEFAULT_POSE_TOPIC},
+    ros::BridgeConfig,
+    RosNav2Backend,
+};
 use kern_policy::{Authority, CapabilityRegistry, Policy, PolicyId, PolicySet, Selector};
 
 const SUBJECT: &str = "planner_a";
@@ -67,14 +72,27 @@ const WORLD_YAW_MDEG: (i64, i64) = (-180_000, 180_000);
 
 /// The semantic world. Named places and nothing else: no topics, no frames, no
 /// action names, and nothing a planner could use to address the machine.
+///
+/// # What used to be here, and why it was wrong
+///
+/// This block ended with the sentence *"The robot is currently at the origin,
+/// idle."* It was true when it was written and false from the first time the
+/// robot moved. Asked to return to the origin from six metres away, the model
+/// answered `no_action` and gave the only reason its inputs supported: the robot
+/// is already there. That was not a hallucination — it was a model correctly
+/// believing a host that was stating something false.
+///
+/// Position is now supplied by observation, from the machine, with an age
+/// attached. Nothing in this constant states where the robot is, and nothing
+/// should ever be added to it that does: a fixed string cannot be current, and a
+/// planner cannot tell a stale fact from a fresh one unless it is told.
 const ROBOT_CONTEXT: &str = "\
 The robot is a delivery base in a straight corridor.
 Named places, in millimetres from the origin:
   station_a: x = -6000, y = 0
   origin:    x = 0,     y = 0
   station_b: x = 6000,  y = 0
-The corridor runs along x. Staying near y = 0 keeps the robot in the corridor.
-The robot is currently at the origin, idle.";
+The corridor runs along x. Staying near y = 0 keeps the robot in the corridor.";
 
 /// Process uptime. The only clock authority lifetime is measured against.
 struct UptimeClock {
@@ -110,6 +128,12 @@ struct Options {
     action: String,
     run_for: Duration,
     settle: Duration,
+    /// The localization topic to observe, or `None` to observe nothing.
+    pose_topic: Option<String>,
+    /// The oldest reading the host will plan on.
+    max_age_ms: u64,
+    /// How long to wait for a first reading before planning without one.
+    observe_wait: Duration,
 }
 
 impl Options {
@@ -120,6 +144,9 @@ impl Options {
             action: String::from("/navigate_to_pose"),
             run_for: Duration::from_secs(120),
             settle: Duration::from_secs(5),
+            pose_topic: Some(String::from(DEFAULT_POSE_TOPIC)),
+            max_age_ms: DEFAULT_MAX_AGE_MS,
+            observe_wait: Duration::from_secs(10),
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -132,6 +159,17 @@ impl Options {
                     options.run_for = Duration::from_secs(value().parse().unwrap_or(120))
                 }
                 "--settle-s" => options.settle = Duration::from_secs(value().parse().unwrap_or(5)),
+                "--pose-topic" => options.pose_topic = Some(value()),
+                // Plans with no position context at all, which is how every
+                // phase before this one behaved. Kept so the difference the
+                // observation makes can be demonstrated rather than asserted.
+                "--no-observe" => options.pose_topic = None,
+                "--max-age-ms" => {
+                    options.max_age_ms = value().parse().unwrap_or(options.max_age_ms)
+                }
+                "--observe-wait-s" => {
+                    options.observe_wait = Duration::from_secs(value().parse().unwrap_or(10))
+                }
                 _ => {}
             }
         }
@@ -185,6 +223,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         RobotContext::new(ROBOT_CONTEXT)?,
         vocabulary,
     );
+
+    // ---- what the host currently observes --------------------------------
+    //
+    // Read before inference, because its whole purpose is to be an input to it.
+    // The observer node is read-only: one subscription, no action client, no
+    // publisher. A proposal refused below therefore still cannot have published
+    // a speed limit or sent a goal, because there is nothing in this process
+    // capable of either until policy has authorized something.
+    //
+    // Never fatal. A host that cannot see where the robot is plans without
+    // knowing where the robot is, and says so — it does not assume a position.
+    let observer = match options.pose_topic.as_deref() {
+        None => None,
+        Some(topic) => match PoseObserver::start(PoseObserverConfig {
+            topic: topic.to_string(),
+            max_age_ms: options.max_age_ms,
+            ..PoseObserverConfig::default()
+        }) {
+            Ok(observer) => {
+                // AMCL publishes on update rather than on a timer, so a first
+                // reading can take a moment on a freshly started stack.
+                observer.wait_for_first(options.observe_wait);
+                Some(observer)
+            }
+            Err(error) => {
+                eprintln!("pose observer unavailable ({error}); planning without a position");
+                None
+            }
+        },
+    };
+
+    let observation = match &observer {
+        Some(observer) => observer.observe(&DeviceId::new(DEVICE)),
+        None => WorldObservation::unavailable(
+            DeviceId::new(DEVICE),
+            ObservationUnavailable::NotObserved,
+        ),
+    };
+
+    println!("OBSERVATION");
+    for line in observation.to_block().lines() {
+        println!("  {line}");
+    }
+    if let Some(observer) = &observer {
+        println!("  freshness bound: {} ms", observer.max_age_ms());
+    }
+    println!();
+
+    let request = request.with_observation(observation);
 
     let config = GatewayConfig::from_env()?;
     println!("provider: {}", config.provider());
@@ -244,9 +331,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let detail = denial_detail(&decision, &proposed_params);
         println!("{}", render_proposal(&record, Some(&action), Some(&detail)));
         println!(
-            "\nPolicy refused it. No challenge was minted, no lease was issued, no execution \
-             identifier was allocated, and no ROS node was ever created — so no speed limit was \
-             published and no NavigateToPose goal was sent."
+            "\nPolicy refused it. No challenge was minted, no lease was issued, and no execution \
+             identifier was allocated. The only ROS node in this process is the read-only pose \
+             observer, which holds one subscription and neither a publisher nor an action \
+             client — so no speed limit was published and no NavigateToPose goal was sent, \
+             because at this point there is nothing here that could send one."
         );
         return Ok(());
     };

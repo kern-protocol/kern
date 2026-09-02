@@ -51,6 +51,7 @@ use kern_execution_nav2::backend::{
 };
 use kern_execution_nav2::EventQueue;
 
+pub mod pose;
 pub mod ros;
 pub mod workstation;
 
