@@ -52,7 +52,9 @@ use kern_execution_nav2::{
 };
 use kern_model_openai_compatible::{load_dotenv, GatewayConfig, GatewayModel};
 use kern_nav2_bridge::{
-    pose::{PoseObserver, PoseObserverConfig, DEFAULT_MAX_AGE_MS, DEFAULT_POSE_TOPIC},
+    pose::{
+        PoseDurability, PoseObserver, PoseObserverConfig, DEFAULT_MAX_AGE_MS, DEFAULT_POSE_TOPIC,
+    },
     ros::BridgeConfig,
     RosNav2Backend,
 };
@@ -134,6 +136,8 @@ struct Options {
     max_age_ms: u64,
     /// How long to wait for a first reading before planning without one.
     observe_wait: Duration,
+    /// Which durability the pose subscription requests.
+    pose_durability: PoseDurability,
 }
 
 impl Options {
@@ -147,6 +151,7 @@ impl Options {
             pose_topic: Some(String::from(DEFAULT_POSE_TOPIC)),
             max_age_ms: DEFAULT_MAX_AGE_MS,
             observe_wait: Duration::from_secs(10),
+            pose_durability: PoseDurability::TransientLocal,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -166,6 +171,9 @@ impl Options {
                 "--no-observe" => options.pose_topic = None,
                 "--max-age-ms" => {
                     options.max_age_ms = value().parse().unwrap_or(options.max_age_ms)
+                }
+                "--pose-durability" => {
+                    options.pose_durability = value().parse().unwrap_or(options.pose_durability)
                 }
                 "--observe-wait-s" => {
                     options.observe_wait = Duration::from_secs(value().parse().unwrap_or(10))
@@ -239,6 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(topic) => match PoseObserver::start(PoseObserverConfig {
             topic: topic.to_string(),
             max_age_ms: options.max_age_ms,
+            durability: options.pose_durability,
             ..PoseObserverConfig::default()
         }) {
             Ok(observer) => {
@@ -253,10 +262,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 let readiness = observer.await_first(options.observe_wait);
                 println!("  {readiness}");
+                let (deliveries, accepted, duplicates, superseded) = observer.delivery_counts();
+                println!(
+                    "  deliveries: {deliveries} (accepted {accepted}, duplicate {duplicates}, \
+                     superseded {superseded})"
+                );
                 if !observer.publisher_seen() {
                     println!(
                         "  hint: nothing publishes {topic}. Check that the localizer is \
                          running, or pass --pose-topic."
+                    );
+                } else if deliveries == 0 {
+                    println!(
+                        "  hint: a publisher exists but delivered nothing here. If it offers \
+                         VOLATILE durability, a transient-local subscriber cannot match it: \
+                         retry with --pose-durability volatile. Check with \
+                         `ros2 topic info {topic} --verbose`."
                     );
                 }
                 Some(observer)

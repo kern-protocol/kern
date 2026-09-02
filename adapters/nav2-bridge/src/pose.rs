@@ -49,8 +49,8 @@ use r2r::{Context, Node, QosProfile};
 
 use kern_ai::observation::{
     meters_to_millimeters, observation_age_ms, quaternion_yaw_radians, radians_to_millidegrees,
-    resolve, ConversionError, ObservationSnapshot, PoseObservation, SourceAgeError, SourceClock,
-    SourceTime, WorldObservation,
+    resolve, Admission, ConversionError, ObservationSnapshot, PoseLedger, PoseObservation,
+    SourceAgeError, SourceClock, SourceTime, WorldObservation,
 };
 use kern_core::DeviceId;
 
@@ -137,6 +137,54 @@ impl std::fmt::Display for PoseObserverError {
 
 impl std::error::Error for PoseObserverError {}
 
+/// Which durability the pose subscription requests.
+///
+/// # Why this is a choice and not both
+///
+/// It was both. Two subscriptions were opened on one node — transient-local to
+/// receive a publisher's retained sample, volatile to stay compatible with a
+/// publisher that offers none — and on the live stack the observer then froze on
+/// a single 57-second-old reading while an independent subscriber on the same
+/// machine received fresh ones continuously. Two readers for one topic on one
+/// node is not a construct this adapter can justify from first principles, and
+/// it is not one whose delivery behaviour can be verified without a robot
+/// attached. It is gone.
+///
+/// One subscription is enough, because the asymmetry runs the useful way: a
+/// **transient-local subscriber matched to a transient-local publisher receives
+/// the retained sample *and* every live one afterwards**. It is only against a
+/// publisher offering volatile durability that it fails to match at all, and
+/// that case is a configuration this host can be told about.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PoseDurability {
+    /// Request `TRANSIENT_LOCAL`: retained sample plus everything live.
+    ///
+    /// The default, and correct for Nav2's AMCL, which advertises
+    /// `RELIABLE`/`TRANSIENT_LOCAL`.
+    #[default]
+    TransientLocal,
+    /// Request `VOLATILE`: live samples only.
+    ///
+    /// For a publisher that offers volatile durability, which a transient-local
+    /// subscriber cannot match at all. The cost is that a stationary machine
+    /// whose last pose was published before this process started is not seen
+    /// until it publishes again — reported honestly as no reading yet, never
+    /// guessed at.
+    Volatile,
+}
+
+impl core::str::FromStr for PoseDurability {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "transient_local" | "transient-local" | "latched" => Ok(Self::TransientLocal),
+            "volatile" | "live" => Ok(Self::Volatile),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Observer configuration.
 #[derive(Clone, Debug)]
 pub struct PoseObserverConfig {
@@ -150,6 +198,8 @@ pub struct PoseObserverConfig {
     pub max_age_ms: u64,
     /// The topic carrying simulated time, when the stack uses it.
     pub clock_topic: String,
+    /// Which durability the pose subscription requests.
+    pub durability: PoseDurability,
 }
 
 impl Default for PoseObserverConfig {
@@ -160,52 +210,39 @@ impl Default for PoseObserverConfig {
             topic: String::from(DEFAULT_POSE_TOPIC),
             max_age_ms: DEFAULT_MAX_AGE_MS,
             clock_topic: String::from(DEFAULT_CLOCK_TOPIC),
+            durability: PoseDurability::TransientLocal,
         }
     }
-}
-
-/// The newest reading, and when this host received it.
-///
-/// The receipt instant is taken from the host's own monotonic clock rather than
-/// from the message header. A header stamp is written by whichever machine
-/// published it, against a clock this process does not control and may not
-/// share; using it would make freshness depend on clock synchronisation that
-/// nothing here establishes. What the host can honestly say is how long ago the
-/// bytes arrived, so that is what it says.
-#[derive(Clone, Copy, Debug)]
-struct Reading {
-    pose: PoseObservation,
-    /// When this process first received *this* source observation.
-    ///
-    /// First, not most recent. The same sample can be delivered twice — once
-    /// per subscription — and a second delivery is not a second observation, so
-    /// it must not make the reading younger.
-    received: Instant,
-    /// The stamp the publisher wrote, which is what identifies the observation
-    /// and orders it against others.
-    stamp: SourceTime,
 }
 
 /// State shared between the observer thread and its readers.
 #[derive(Debug)]
 struct Shared {
-    /// The newest usable reading, if any has ever arrived.
-    latest: Mutex<Option<Reading>>,
+    /// The newest usable reading, and what became of every delivery.
+    ///
+    /// Counting is not decoration. When an observer reports a stale pose while
+    /// the topic is demonstrably live, "nothing arrived" and "something arrived
+    /// and was rejected" are different faults with different fixes, and from
+    /// outside the process they look identical. These counters separate them in
+    /// one line of output.
+    ledger: Mutex<PoseLedger>,
+    /// When the observer started, so a receipt instant can be plain millis.
+    started: Instant,
     /// The most recent conversion failure, if the newest message was unusable.
     ///
-    /// Kept separately from `latest` so an unusable message does not erase a
-    /// good earlier one: the honest report is then "here is a reading, and it
-    /// is this old", and staleness handles the rest.
+    /// Kept apart from the ledger so an unusable message does not erase a good
+    /// earlier one: the honest report is then "here is a reading, and it is this
+    /// old", and staleness handles the rest.
     last_error: Mutex<Option<ConversionError>>,
     /// False once the observer thread has stopped, for any reason.
     alive: AtomicBool,
     /// The newest `/clock` sample, and when this host received it.
     ///
-    /// This is the only way to obtain a time in the same domain as a message
-    /// stamp under simulated time. It is deliberately not extrapolated: a
-    /// paused simulator stops publishing, and inventing elapsed simulated time
-    /// from host elapsed time would be exactly the cross-domain arithmetic this
-    /// whole mechanism exists to avoid.
+    /// The only way to obtain a time in the same domain as a message stamp
+    /// under simulated time. Deliberately not extrapolated: a paused simulator
+    /// stops publishing, and inventing elapsed simulated time from host elapsed
+    /// time would be exactly the cross-domain arithmetic this whole mechanism
+    /// exists to avoid.
     ros_clock: Mutex<Option<(SourceTime, Instant)>>,
     /// Why the newest reading's age could not be established, if it could not.
     age_error: Mutex<Option<SourceAgeError>>,
@@ -247,7 +284,8 @@ impl PoseObserver {
     /// does not proceed with an assumed position.
     pub fn start(config: PoseObserverConfig) -> Result<Self, PoseObserverError> {
         let shared = Arc::new(Shared {
-            latest: Mutex::new(None),
+            ledger: Mutex::new(PoseLedger::new()),
+            started: Instant::now(),
             last_error: Mutex::new(None),
             ros_clock: Mutex::new(None),
             age_error: Mutex::new(None),
@@ -269,47 +307,33 @@ impl PoseObserver {
                 // a stale reading looking live: the thread is marked dead and
                 // every later observation says the source is unavailable.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let (mut node, latched, live, clock) = match Context::create()
+                    let (mut node, poses, clock) = match Context::create()
                         .and_then(|context| {
                             Node::create(context, &config.node_name, &config.namespace)
                         })
                         .and_then(|mut node| {
-                            // Two subscriptions to one topic, because a single
-                            // durability setting cannot match both kinds of
-                            // publisher, and getting it wrong fails silently.
-                            //
-                            // TRANSIENT_LOCAL is what receives a *latched*
-                            // sample. AMCL publishes `amcl_pose` on update
-                            // rather than on a timer, so a stationary robot's
-                            // only pose may have been published long ago and
-                            // retained by the publisher. A VOLATILE subscriber
-                            // matches such a publisher perfectly well and is
-                            // simply never given the retained sample: it waits
-                            // forever for a message that already happened.
-                            // That is the defect this pair fixes.
-                            //
-                            // The volatile subscription stays because the
-                            // reverse mismatch is worse: a TRANSIENT_LOCAL
-                            // subscriber is *incompatible* with a VOLATILE
-                            // publisher and matches nothing at all, so a
-                            // deployment whose localizer publishes volatile
-                            // would go blind if this were the only one.
-                            //
-                            // Neither can produce a wrong pose. The worst a
-                            // redundant delivery does is hand over the same
-                            // reading twice, and the newest wins.
-                            let latched = node.subscribe::<PoseWithCovarianceStamped>(
+                            // One subscription, not two. A transient-local
+                            // subscriber matched to a transient-local publisher
+                            // receives the retained sample *and* every live one
+                            // after it, so the retained case needs no second
+                            // reader — and a second reader on the same topic and
+                            // node is a construct whose delivery behaviour this
+                            // adapter could not justify or verify, and which
+                            // coincided with the observer freezing on one stale
+                            // sample while the topic was demonstrably live.
+                            let poses = node.subscribe::<PoseWithCovarianceStamped>(
                                 &config.topic,
-                                QosProfile::default().transient_local(),
-                            )?;
-                            let live = node.subscribe::<PoseWithCovarianceStamped>(
-                                &config.topic,
-                                QosProfile::default(),
+                                match config.durability {
+                                    PoseDurability::TransientLocal => {
+                                        QosProfile::default().transient_local()
+                                    }
+                                    PoseDurability::Volatile => QosProfile::default(),
+                                },
                             )?;
                             // The only source of a time in the same domain as
                             // the pose stamps. Under `use_sim_time` every node
-                            // in the graph reads its clock from here, so this
-                            // is the domain by definition rather than by
+                            // in the graph reads its clock from here, so this is
+                            // the domain by definition rather than by
                             // assumption. When nothing publishes it, the stack
                             // is on wall-clock time and the fallback in
                             // `source_clock` applies.
@@ -317,7 +341,7 @@ impl PoseObserver {
                                 &config.clock_topic,
                                 QosProfile::default(),
                             )?;
-                            Ok((node, latched, live, clock))
+                            Ok((node, poses, clock))
                         }) {
                         Ok(parts) => {
                             let _ = ready_tx.send(Ok(()));
@@ -330,8 +354,7 @@ impl PoseObserver {
                     };
                     run(
                         &mut node,
-                        Box::pin(latched),
-                        Box::pin(live),
+                        Box::pin(poses),
                         Box::pin(clock),
                         &config.topic,
                         &thread_shared,
@@ -383,27 +406,37 @@ impl PoseObserver {
     /// moment of asking — a reading does not carry an age, it acquires one when
     /// somebody wants to know.
     fn snapshot(&self) -> ObservationSnapshot {
-        let reading = self.shared.latest.lock().ok().and_then(|guard| *guard);
-        let clock = self.source_clock(reading.map(|reading| reading.stamp));
+        let held = self
+            .shared
+            .ledger
+            .lock()
+            .ok()
+            .and_then(|guard| guard.held());
+        let clock = self.source_clock(held.map(|(_, stamp, _)| stamp));
+        let now_ms = self
+            .shared
+            .started
+            .elapsed()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
 
         let mut age_error = None;
-        let pose = reading.and_then(|reading| {
+        let pose = held.and_then(|(pose, stamp, received_ms)| {
             // Receipt age: host monotonic, always available, and a lower bound
-            // on staleness. Saturating because a wrong answer here must not be
-            // a panic on a planning path.
-            let receipt_age_ms =
-                reading.received.elapsed().as_millis().min(u64::MAX as u128) as u64;
-            match observation_age_ms(reading.stamp, clock, receipt_age_ms) {
+            // on staleness. It is measured from the *first* delivery of this
+            // source stamp, so a redelivery cannot make it younger.
+            let receipt_age_ms = now_ms.saturating_sub(received_ms);
+            match observation_age_ms(stamp, clock, receipt_age_ms) {
                 Ok(age_ms) => Some(PoseObservation::new(
-                    reading.pose.x_mm(),
-                    reading.pose.y_mm(),
-                    reading.pose.yaw_mdeg(),
+                    pose.x_mm(),
+                    pose.y_mm(),
+                    pose.yaw_mdeg(),
                     age_ms,
                 )),
                 Err(error) => {
                     // A reading whose age cannot be established is not a fresh
-                    // reading, and is not offered as one. The coordinates are
-                    // dropped with it.
+                    // reading and is not offered as one. Its coordinates go
+                    // with it.
                     age_error = Some(error);
                     None
                 }
@@ -418,6 +451,26 @@ impl PoseObserver {
             publisher_seen: self.shared.publisher_seen.load(Ordering::SeqCst),
             source_alive: self.shared.alive.load(Ordering::SeqCst),
         }
+    }
+
+    /// What the ledger has seen: deliveries, accepted, duplicates, superseded.
+    ///
+    /// For the demo banner and for a bug report. A transcript that says "stale
+    /// pose" and nothing else cannot distinguish a silent topic from a rejected
+    /// stream; one that also says `deliveries=0` or `superseded=412` can.
+    pub fn delivery_counts(&self) -> (u64, u64, u64, u64) {
+        self.shared
+            .ledger
+            .lock()
+            .map(|ledger| {
+                (
+                    ledger.deliveries(),
+                    ledger.accepted(),
+                    ledger.duplicates(),
+                    ledger.superseded(),
+                )
+            })
+            .unwrap_or((0, 0, 0, 0))
     }
 
     /// A current time in the same domain `stamp` was written in, if one exists.
@@ -565,8 +618,7 @@ impl Drop for PoseObserver {
 /// The observer loop: spin, take whatever arrived, convert it, store it.
 fn run(
     node: &mut Node,
-    mut latched: Pin<Box<impl futures::Stream<Item = PoseWithCovarianceStamped> + ?Sized>>,
-    mut live: Pin<Box<impl futures::Stream<Item = PoseWithCovarianceStamped> + ?Sized>>,
+    mut poses: Pin<Box<impl futures::Stream<Item = PoseWithCovarianceStamped> + ?Sized>>,
     mut clock: Pin<Box<impl futures::Stream<Item = ClockMsg> + ?Sized>>,
     topic: &str,
     shared: &Arc<Shared>,
@@ -594,13 +646,10 @@ fn run(
         // against the freshest clock sample available.
         drain_clock(&mut clock, shared);
 
-        // Drain both pose subscriptions, keeping the newest source observation:
-        // a planner wants the current position, not a history. One stream
-        // ending means its subscription is gone; the other may still deliver,
-        // so it is not fatal on its own.
-        let latched_open = drain(&mut latched, shared);
-        let live_open = drain(&mut live, shared);
-        if !latched_open && !live_open {
+        // Then every pose queued. The ledger keeps the newest by source stamp,
+        // so a retained backlog delivered oldest-first settles on its newest
+        // member, and a live sample that follows supersedes it.
+        if !drain(&mut poses, shared) {
             return;
         }
     }
@@ -643,30 +692,11 @@ fn apply(shared: &Arc<Shared>, message: &PoseWithCovarianceStamped) {
     let stamp = SourceTime::from_ros(message.header.stamp.sec, message.header.stamp.nanosec);
     match convert(message) {
         Ok(pose) => {
-            if let Ok(mut latest) = shared.latest.lock() {
-                let replace = match latest.as_ref() {
-                    // Nothing stored: anything is an improvement.
-                    None => true,
-                    // The same source observation, delivered a second time —
-                    // which is routine here, since the transient-local and
-                    // volatile subscriptions both carry it. It is one
-                    // observation, so the stored receipt instant stays as it
-                    // was. Refreshing it would make an old reading younger for
-                    // no reason other than that DDS delivered it twice.
-                    Some(stored) if stored.stamp == stamp => false,
-                    // Strictly newer wins; strictly older is discarded. DDS
-                    // does not promise ordered delivery across two
-                    // subscriptions, so an older sample arriving after a newer
-                    // one is expected, and must never overwrite it.
-                    Some(stored) => stamp > stored.stamp,
-                };
-                if replace {
-                    *latest = Some(Reading {
-                        pose,
-                        received: Instant::now(),
-                        stamp,
-                    });
-                }
+            let received_ms = shared.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            if let Ok(mut ledger) = shared.ledger.lock() {
+                // The ordering and duplicate rules live in the ledger, where
+                // they can be tested without a robot.
+                let _: Admission = ledger.record(pose, stamp, received_ms);
             }
             if let Ok(mut error) = shared.last_error.lock() {
                 *error = None;

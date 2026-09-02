@@ -507,6 +507,117 @@ impl PoseKnowledge {
     }
 }
 
+/// What happened to an incoming reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Admission {
+    /// Newer than what was held, so it replaced it.
+    Accepted,
+    /// The same source observation, delivered again.
+    ///
+    /// Routine: a retained sample and a live one can carry the same stamp, and
+    /// a redelivery is not a second observation. The held receipt instant is
+    /// left alone, because refreshing it would make an old reading younger for
+    /// no reason other than that the middleware handed it over twice.
+    Duplicate,
+    /// Older than what was held, so it was discarded.
+    ///
+    /// DDS does not promise ordered delivery, and a retained backlog is
+    /// delivered oldest-first. An older sample arriving after a newer one is
+    /// ordinary, and it must never overwrite the newer one.
+    Superseded,
+}
+
+/// Holds the newest pose observation, and only the newest.
+///
+/// # Why this is in `kern-ai` and not in the ROS adapter
+///
+/// Because it is the rule that decides which of several deliveries the planner
+/// is shown, and a live run cannot tell you whether it is right. The defect
+/// that produced this type was a planner reporting a 57-second-old pose while
+/// an independent subscriber on the same machine saw 18-millisecond-old ones:
+/// from the outside, "the sample never arrived" and "the sample arrived and was
+/// rejected" look identical. Here they are two different assertions.
+///
+/// The ledger knows nothing about ROS, nothing about clocks, and nothing about
+/// authority. It orders observations by their source stamp and counts what it
+/// did.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PoseLedger {
+    held: Option<(PoseObservation, SourceTime, u64)>,
+    accepted: u64,
+    duplicates: u64,
+    superseded: u64,
+}
+
+impl PoseLedger {
+    /// An empty ledger.
+    pub const fn new() -> Self {
+        Self {
+            held: None,
+            accepted: 0,
+            duplicates: 0,
+            superseded: 0,
+        }
+    }
+
+    /// Offers one reading, taken at host monotonic time `received_ms`.
+    ///
+    /// The `age_ms` field of `pose` is ignored and recomputed later: a reading
+    /// has no age at the moment it arrives, it acquires one when somebody asks.
+    pub fn record(
+        &mut self,
+        pose: PoseObservation,
+        stamp: SourceTime,
+        received_ms: u64,
+    ) -> Admission {
+        match self.held {
+            Some((_, held, _)) if stamp == held => {
+                self.duplicates += 1;
+                Admission::Duplicate
+            }
+            Some((_, held, _)) if stamp < held => {
+                self.superseded += 1;
+                Admission::Superseded
+            }
+            _ => {
+                self.held = Some((pose, stamp, received_ms));
+                self.accepted += 1;
+                Admission::Accepted
+            }
+        }
+    }
+
+    /// The held reading, its stamp, and when it was first received.
+    pub fn held(&self) -> Option<(PoseObservation, SourceTime, u64)> {
+        self.held
+    }
+
+    /// The stamp of the held reading.
+    pub fn stamp(&self) -> Option<SourceTime> {
+        self.held.map(|(_, stamp, _)| stamp)
+    }
+
+    /// How many readings replaced the held one.
+    pub fn accepted(&self) -> u64 {
+        self.accepted
+    }
+
+    /// How many arrived carrying a stamp already held.
+    pub fn duplicates(&self) -> u64 {
+        self.duplicates
+    }
+
+    /// How many arrived older than the held one and were discarded.
+    pub fn superseded(&self) -> u64 {
+        self.superseded
+    }
+
+    /// Every delivery this ledger has seen.
+    pub fn deliveries(&self) -> u64 {
+        self.accepted + self.duplicates + self.superseded
+    }
+}
+
 /// Everything the host knows at the instant an observation is resolved.
 ///
 /// # Why this type exists
