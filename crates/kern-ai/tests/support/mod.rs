@@ -122,8 +122,7 @@ Named places, in millimetres from the origin:
   station_a: x = -6000, y = 0
   origin:    x = 0,     y = 0
   station_b: x = 6000,  y = 0
-The corridor runs along x. Staying near y = 0 keeps the robot in the corridor.
-The robot is currently at the origin, idle.";
+The corridor runs along x. Staying near y = 0 keeps the robot in the corridor.";
 
 pub fn vocabulary(authority: &Authority) -> CapabilityVocabulary {
     CapabilityVocabulary::from_registry(authority.registry(), &device()).expect("navigate exists")

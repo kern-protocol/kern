@@ -222,11 +222,8 @@ fn probe_request() -> kern_ai::PlanningRequest {
         SubjectId::new("planner_a"),
         device.clone(),
         Instruction::new("Take the parcel to station B.").expect("bounded"),
-        RobotContext::new(
-            "The robot is in a straight corridor. station_b is at x = 6000, y = 0. \
-             The robot is at the origin, idle.",
-        )
-        .expect("bounded"),
+        RobotContext::new("The robot is in a straight corridor. station_b is at x = 6000, y = 0.")
+            .expect("bounded"),
         CapabilityVocabulary::from_registry(&registry, &device).expect("navigate exists"),
     )
 }

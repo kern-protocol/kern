@@ -69,8 +69,7 @@ Named places, in millimetres from the origin:
   station_a: x = -6000, y = 0
   origin:    x = 0,     y = 0
   station_b: x = 6000,  y = 0
-The corridor runs along x. Staying near y = 0 keeps the robot in the corridor.
-The robot is currently at the origin, idle.";
+The corridor runs along x. Staying near y = 0 keeps the robot in the corridor.";
 
 /// A scenario named a world that does not exist.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,7 +96,6 @@ cafe_robot — a mobile delivery base in a straight corridor.
     origin:    x = 0,     y = 0
     table_3:   x = 6000,  y = 0
   The corridor runs along x. Staying near y = 0 keeps the robot in it.
-  The robot is at the origin, idle.
 
 conveyor_01 — a belt that transfers one package between two stations.
   Stations: station_a, station_b.
