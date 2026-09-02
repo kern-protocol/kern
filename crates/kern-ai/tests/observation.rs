@@ -920,3 +920,263 @@ fn no_shipped_robot_context_asserts_a_position() {
         }
     }
 }
+
+// ---- ingestion: which delivery the planner actually ends up seeing -------
+//
+// The live reproducer these exist for: an independent subscriber saw poses
+// 12-33 ms old while Kern, on the same machine at the same moment, reported its
+// newest reading as 57091 ms old. From outside the process "the sample never
+// arrived" and "the sample arrived and was rejected" are indistinguishable.
+// Here they are separate assertions with separate counters.
+
+use kern_ai::observation::{Admission, PoseLedger};
+
+fn sample(x_mm: i64) -> PoseObservation {
+    PoseObservation::new(x_mm, 0, 0, 0)
+}
+
+#[test]
+fn a_newer_live_sample_replaces_a_retained_stale_one() {
+    // Requirement 1, and the shape of the live failure: the retained sample
+    // arrives first and must not be what the planner is left with.
+    let mut ledger = PoseLedger::new();
+    assert_eq!(
+        ledger.record(sample(-8_000), sim(477), 0),
+        Admission::Accepted
+    );
+    assert_eq!(
+        ledger.record(sample(2_834), sim(528), 57_000),
+        Admission::Accepted
+    );
+
+    let (pose, stamp, received_ms) = ledger.held().expect("a reading");
+    assert_eq!(pose.x_mm(), 2_834, "the live sample must win");
+    assert_eq!(stamp, sim(528));
+    assert_eq!(
+        received_ms, 57_000,
+        "receipt instant follows the accepted sample"
+    );
+    assert_eq!(ledger.accepted(), 2);
+}
+
+#[test]
+fn a_duplicate_stamp_does_not_refresh_the_receipt_instant() {
+    // Requirement 2. A redelivery is not a second observation, and must not
+    // make an old reading younger.
+    let mut ledger = PoseLedger::new();
+    ledger.record(sample(-8_000), sim(477), 0);
+    assert_eq!(
+        ledger.record(sample(-8_000), sim(477), 57_000),
+        Admission::Duplicate
+    );
+
+    let (_, _, received_ms) = ledger.held().expect("a reading");
+    assert_eq!(
+        received_ms, 0,
+        "a duplicate must not reset the receipt instant"
+    );
+    assert_eq!(ledger.duplicates(), 1);
+    assert_eq!(ledger.accepted(), 1);
+}
+
+#[test]
+fn an_older_stamp_arriving_later_is_ignored() {
+    // Requirement 3. A retained backlog is delivered oldest-first and DDS does
+    // not promise ordering, so a late old sample is ordinary — and must never
+    // overwrite a newer one.
+    let mut ledger = PoseLedger::new();
+    ledger.record(sample(2_834), sim(528), 100);
+    assert_eq!(
+        ledger.record(sample(-8_000), sim(477), 200),
+        Admission::Superseded
+    );
+
+    let (pose, stamp, received_ms) = ledger.held().expect("a reading");
+    assert_eq!(pose.x_mm(), 2_834);
+    assert_eq!(stamp, sim(528));
+    assert_eq!(received_ms, 100);
+    assert_eq!(ledger.superseded(), 1);
+}
+
+#[test]
+fn a_retained_backlog_settles_on_its_newest_member() {
+    // Transient-local delivery hands over up to the publisher's history depth,
+    // oldest first. Whatever order they arrive in, the newest must win.
+    for order in [[0usize, 1, 2], [2, 1, 0], [1, 2, 0]] {
+        let stamps = [sim(520), sim(528), sim(534)];
+        let mut ledger = PoseLedger::new();
+        for (step, index) in order.into_iter().enumerate() {
+            ledger.record(sample(index as i64), stamps[index], step as u64);
+        }
+        assert_eq!(
+            ledger.stamp(),
+            Some(sim(534)),
+            "the newest stamp must win regardless of arrival order"
+        );
+    }
+}
+
+#[test]
+fn a_fresh_sample_after_a_stale_one_makes_the_observation_fresh() {
+    // Requirement 5, end to end through age and resolution rather than only
+    // through the ledger.
+    let mut ledger = PoseLedger::new();
+    ledger.record(sample(-8_000), sim(477), 0);
+    ledger.record(sample(2_834), sim(534), 57_000);
+
+    let (pose, stamp, received_ms) = ledger.held().expect("a reading");
+    let now_ms = 57_018;
+    let age = observation_age_ms(
+        stamp,
+        SourceClock::Established(SourceTime::from_nanos(sim(534).nanos() + 18_000_000)),
+        now_ms - received_ms,
+    )
+    .expect("datable");
+    assert_eq!(age, 18, "matches what an independent subscriber reports");
+
+    let resolved = resolve(
+        device(),
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(
+                pose.x_mm(),
+                pose.y_mm(),
+                pose.yaw_mdeg(),
+                age,
+            )),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert!(resolved.pose().is_known(), "{resolved:?}");
+    assert!(resolved.to_block().contains("x = 2834 mm"));
+}
+
+#[test]
+fn only_stale_samples_leave_the_observation_unknown() {
+    // Requirement 6. Fail closed, with the coordinates withheld.
+    let mut ledger = PoseLedger::new();
+    ledger.record(sample(-8_000), sim(477), 0);
+
+    let (_, stamp, received_ms) = ledger.held().expect("a reading");
+    let age = observation_age_ms(
+        stamp,
+        SourceClock::Established(sim(534)),
+        1_000 - received_ms,
+    )
+    .expect("datable");
+    assert_eq!(age, 57_000);
+
+    let resolved = resolve(
+        device(),
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(-8_000, 0, 0, age)),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert!(matches!(
+        resolved.pose().unavailable(),
+        Some(ObservationUnavailable::Stale { .. })
+    ));
+    assert!(!resolved.to_block().contains("-8000"));
+}
+
+#[test]
+fn a_bounded_wait_prefers_a_later_fresh_sample_over_an_early_stale_one() {
+    // Requirement 4, expressed as the sequence a wait walks through. A stale
+    // reading present at the first poll must not end the wait; the fresh one
+    // that arrives during it must.
+    let mut ledger = PoseLedger::new();
+    ledger.record(sample(-8_000), sim(477), 0);
+
+    let stale_age =
+        observation_age_ms(sim(477), SourceClock::Established(sim(534)), 0).expect("datable");
+    assert!(
+        stale_age > 5_000,
+        "the first poll sees only a stale reading"
+    );
+
+    // A live sample lands mid-wait.
+    assert_eq!(
+        ledger.record(sample(2_834), sim(534), 100),
+        Admission::Accepted
+    );
+    let fresh_age = observation_age_ms(
+        ledger.stamp().expect("held"),
+        SourceClock::Established(SourceTime::from_nanos(sim(534).nanos() + 20_000_000)),
+        20,
+    )
+    .expect("datable");
+    assert!(
+        fresh_age <= 5_000,
+        "the wait can now succeed: {fresh_age} ms"
+    );
+}
+
+#[test]
+fn no_clock_leaves_a_perfectly_good_reading_undatable() {
+    // Requirement 7. A reading whose age cannot be established is not fresh,
+    // and its coordinates do not reach the planner.
+    let mut ledger = PoseLedger::new();
+    ledger.record(sample(2_834), sim(534), 0);
+
+    assert_eq!(
+        observation_age_ms(ledger.stamp().expect("held"), SourceClock::Unavailable, 5),
+        Err(SourceAgeError::ClockUnavailable)
+    );
+    let resolved = resolve(
+        device(),
+        ObservationSnapshot {
+            age_error: Some(SourceAgeError::ClockUnavailable),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert!(resolved.pose().pose().is_none());
+    assert!(!resolved.to_block().contains("2834"));
+}
+
+#[test]
+fn a_paused_clock_still_lets_receipt_age_expire_the_reading() {
+    // Requirement 8. Simulated time frozen, so source age stops advancing —
+    // but the host's monotonic clock does not, and the reading ages out on it.
+    let frozen = SourceClock::Established(sim(534));
+    assert_eq!(observation_age_ms(sim(534), frozen, 0), Ok(0));
+    assert_eq!(observation_age_ms(sim(534), frozen, 4_000), Ok(4_000));
+    assert_eq!(observation_age_ms(sim(534), frozen, 60_000), Ok(60_000));
+
+    let resolved = resolve(
+        device(),
+        ObservationSnapshot {
+            pose: Some(PoseObservation::new(2_834, 0, 0, 60_000)),
+            publisher_seen: true,
+            ..ObservationSnapshot::pending()
+        },
+        5_000,
+    );
+    assert!(matches!(
+        resolved.pose().unavailable(),
+        Some(ObservationUnavailable::Stale { .. })
+    ));
+}
+
+#[test]
+fn the_counters_separate_a_silent_topic_from_a_rejected_stream() {
+    // The diagnostic the live failure needed. `deliveries = 0` and
+    // `superseded = 412` are different bugs, and a transcript that reports
+    // neither cannot tell them apart.
+    let silent = PoseLedger::new();
+    assert_eq!(silent.deliveries(), 0);
+
+    let mut rejecting = PoseLedger::new();
+    rejecting.record(sample(0), sim(600), 0);
+    for step in 1..=5 {
+        rejecting.record(sample(step), sim(500 + step), step as u64);
+    }
+    assert_eq!(rejecting.deliveries(), 6);
+    assert_eq!(rejecting.accepted(), 1);
+    assert_eq!(rejecting.superseded(), 5);
+}
