@@ -130,6 +130,87 @@ Bounded by shape rather than by a length check: an identifier and at most four
 integers. There is no map, no list, no free-text field, and no way to attach a
 sensor payload, so there is no unbounded input to bound.
 
+## Two ages, and why receipt age alone is not enough
+
+**Receipt age** is how long *this process* has held the message, measured on the
+host's monotonic clock. It is always available and always trustworthy, and it
+answers the wrong question.
+
+**Source age** is how old the observation is according to the clock the
+publisher stamped it with. It answers the right question, and it is only
+available when a clock in that same domain can be established.
+
+The gap between them is not hypothetical — it was a blocking defect found in
+review. A `TRANSIENT_LOCAL` publisher hands a retained sample to every new
+subscriber. The sample may have been published an hour ago; it is delivered a
+millisecond ago. Stamping it at receipt reported an hour-old pose as `age: 3 ms`
+and the freshness bound could not see it. The first live run did exactly this:
+the message carried `stamp: sec 0, nanosec 100000000` — simulated time 0.1 s,
+published at stack startup — and Kern printed `reading age: 3 ms`.
+
+So the reported age is:
+
+```text
+age = max(source age, receipt age)
+```
+
+Both are lower bounds on how stale the reading is, so the larger is the honest
+one. This is a maximum of two quantities each computed **inside a single clock
+domain**. It is not a blend, and one is never subtracted from the other.
+
+When source age cannot be established, the observation is refused. An
+observation of unknown age is not a fresh observation.
+
+## Clock domains
+
+`header.stamp` is written in the publisher's domain. The host's monotonic clock
+is a different domain. Under simulated time they are not remotely comparable: a
+Gazebo stack seconds into a run stamps at `0.1 s` while the host reads about 1.7
+billion seconds. Subtracting one from the other yields a number, and the number
+is meaningless.
+
+The domain is therefore established explicitly, never assumed:
+
+| | how the current source time is obtained |
+|---|---|
+| something publishes `/clock` | that value, used directly, never extrapolated |
+| nothing ever publishes `/clock` | the host wall clock, if the stamp is plausibly near it |
+| anything else | unavailable — the observation is refused |
+
+`/clock` **is** the simulated domain by definition, which is why it is
+subscribed to rather than reconstructed. It is deliberately not extrapolated
+with host elapsed time: a paused simulator stops publishing, and adding host
+milliseconds to the last simulated value would invent simulated time that never
+happened. A `/clock` sample older than two seconds in host terms means the
+simulated present is unknown, and the observation becomes `UNKNOWN`.
+
+`r2r`'s `Clock::create(ClockType::RosTime)` is **not** used. It builds a bare
+`rcl` clock with no attached time source, so under `use_sim_time` it does not
+follow `/clock` — it would silently return wall time and reintroduce exactly the
+cross-domain subtraction this section exists to prevent.
+
+### This does not touch authority
+
+Kern's authority lifetime remains host-monotonic and is unchanged. A paused
+simulator does not pause a lease. The ROS clock is consulted for one purpose —
+deciding how old a pose reading is — and no crate that decides authority
+(`kern-core`, `kern-authority`, `kern-enforcer`, `kern-execution`) depends on
+`kern-ai` at all, which a test asserts against their manifests.
+
+## Identity, duplicates, and ordering
+
+The two subscriptions mean the same sample routinely arrives twice. A source
+stamp identifies an observation:
+
+| incoming stamp | result |
+|---|---|
+| equal to the stored one | same observation; the stored receipt instant is **not** refreshed |
+| strictly newer | replaces the stored reading, with a fresh receipt instant |
+| strictly older | discarded — DDS does not order delivery across two subscriptions |
+
+A second delivery is not a second observation, and must not make a reading
+younger.
+
 ## Source, units, freshness
 
 | | |
@@ -139,13 +220,16 @@ sensor payload, so there is no unbounded input to bound.
 | distance | metres → millimetres, ×1000 |
 | angle | quaternion → yaw radians → millidegrees, ×(180000/π) |
 | rounding | half away from zero, so `+x` and `-x` stay symmetric |
-| age | host monotonic clock, from message receipt to request assembly |
+| receipt age | host monotonic clock, from message receipt to request assembly |
+| source age | `header.stamp` against a same-domain clock; see above |
+| reported age | the larger of the two |
 | freshness bound | 5000 ms default, configurable with `--max-age-ms` |
 
-Age is measured against the host's own clock, from when the bytes arrived. A
-header stamp is written by whichever machine published it, against a clock this
-process does not control and may not share; using it would make freshness depend
-on clock synchronisation nothing here establishes.
+A header stamp is written by whichever machine published it, against a clock
+this process does not control and may not share. That is why it is used only
+where the domain can be established, and why failing to establish it costs the
+observation rather than producing a guess. Kern's authority lifetime never
+consults it.
 
 The freshness default is generous because AMCL publishes on update rather than on
 a timer. A stationary, well-localized robot can legitimately go seconds without a
@@ -193,6 +277,9 @@ most of why the cause was not obvious from the transcript.
 |---|---|
 | no publisher discovered | `Unavailable(SourceUndiscovered)` |
 | publisher present, nothing sent | `Unavailable(NotYetReceived)` |
+| stamp unset (`0, 0`) | `Unavailable(SourceTimeUnusable(Unset))` |
+| no clock in the stamp's domain | `Unavailable(SourceTimeUnusable(ClockUnavailable))` |
+| stamp far ahead of the source clock | `Unavailable(SourceTimeUnusable(Future))` |
 | reading older than the bound | `Unavailable(Stale { age_ms, max_age_ms })` |
 | NaN | `Unavailable(Unrepresentable(NotANumber))` |
 | ±infinity | `Unavailable(Unrepresentable(Infinite))` |
@@ -231,8 +318,29 @@ kern-ai-demo --no-observe
   and arm are unchanged.
 - AMCL's estimate is only as good as its localization. A delocalized robot
   produces a confident, wrong observation, and nothing here detects that. The
-  covariance is available on the message and is currently ignored.
+  covariance is available on the message and is currently ignored. "Recent" here
+  means recent according to the configured observation-source semantics; it does
+  not mean physically correct, and no claim is made about localization
+  integrity.
+- A compromised or faulty publisher on the pose topic can state any position and
+  any stamp. Kern treats the observation source as a trusted input boundary for
+  *planning context* and proves nothing about it. What contains the consequence
+  is that the observation grants no authority: the resulting proposal still has
+  to pass policy.
 - The observer is a second ROS node. It exists because the demo deliberately
   creates no action client until policy has authorized something, and the
   observation is needed strictly earlier. It is started once per process, not per
   inference.
+
+## Live validation status
+
+The freshness mechanism described above has **not** yet been validated live. The
+runs performed before this section was written exercised the defective
+mechanism — they reported `age: 3 ms` for a retained sample stamped at simulated
+time 0.1 s — and are retained only as pre-fix debugging evidence. They are not
+acceptance artifacts and no measurement from them is quoted as one.
+
+The QoS root cause remains **supported but not proven**: the retained-sample
+explanation fits every observed symptom, but the publisher's durability has
+never been measured directly. `ros2 topic info /amcl_pose --verbose` settles it.
+The implementation is written to be correct for either durability.
