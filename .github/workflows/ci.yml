@@ -69,6 +69,14 @@ jobs:
         working-directory: adapters/openai-compatible
         run: cargo build --all-targets --verbose
 
+      # The wiring evidence: which base URL an environment resolves to, what the
+      # request body carries and what it must never carry, how a thinking
+      # model's envelope is read, and which HTTP status means which frozen
+      # failure. No step here opens a socket, so it runs with no credential.
+      - name: cargo test
+        working-directory: adapters/openai-compatible
+        run: cargo test --verbose
+
   evaluation:
     name: deterministic adversarial evaluation
     runs-on: ubuntu-latest
