@@ -195,6 +195,159 @@ pub const fn normalize_mdeg(mdeg: i64) -> i64 {
     }
 }
 
+/// A timestamp as the observation source wrote it.
+///
+/// Nanoseconds, in whatever clock domain the publisher was using. Held as
+/// `i128` so the arithmetic against another timestamp cannot overflow and so a
+/// negative difference stays negative instead of wrapping into an enormous
+/// positive age.
+///
+/// # This carries no domain
+///
+/// A `SourceTime` is a number. Whether it means simulated time, wall-clock
+/// time, or something else is a property of the publisher, not of this value,
+/// and is why [`SourceClock`] must be established separately rather than
+/// assumed. Two timestamps may only be subtracted when both come from the same
+/// domain, and nothing in this type can tell you that they do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SourceTime {
+    nanos: i128,
+}
+
+impl SourceTime {
+    /// From a ROS `builtin_interfaces/Time`.
+    pub const fn from_ros(sec: i32, nanosec: u32) -> Self {
+        Self {
+            nanos: (sec as i128) * 1_000_000_000 + (nanosec as i128),
+        }
+    }
+
+    /// From raw nanoseconds.
+    pub const fn from_nanos(nanos: i128) -> Self {
+        Self { nanos }
+    }
+
+    /// The raw nanoseconds.
+    pub const fn nanos(self) -> i128 {
+        self.nanos
+    }
+
+    /// Whether this is the all-zero stamp ROS uses for "not set".
+    ///
+    /// A publisher that never filled in the header leaves `sec = 0,
+    /// nanosec = 0`. Under simulated time that is also a legitimate instant —
+    /// the very start of the run — which is precisely why it is refused rather
+    /// than interpreted: the two cases are indistinguishable from here, and one
+    /// of them would make an arbitrarily old observation look new.
+    pub const fn is_unset(self) -> bool {
+        self.nanos == 0
+    }
+}
+
+/// The current time in the same clock domain as a [`SourceTime`].
+///
+/// # Why this is not just "now"
+///
+/// The host's monotonic clock and a ROS message stamp are different domains,
+/// and under simulated time they are not even close: a Gazebo stack a few
+/// seconds into a run stamps messages at `0.1 s` while the host's wall clock
+/// reads some 1.7 billion seconds. Subtracting one from the other produces a
+/// number, and that number is meaningless.
+///
+/// So the domain is established explicitly, or it is not established and the
+/// age is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceClock {
+    /// A current reading from the same domain the stamp was written in.
+    Established(SourceTime),
+    /// No clock in the stamp's domain could be established.
+    ///
+    /// Simulated time with no `/clock` arriving, a paused simulator, or a
+    /// publisher whose domain does not match anything the host can read.
+    Unavailable,
+}
+
+/// The age of an observation could not be established.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceAgeError {
+    /// The stamp was the all-zero "not set" value.
+    Unset,
+    /// No clock in the stamp's domain was available.
+    ClockUnavailable,
+    /// The stamp is ahead of the source clock by more than the tolerance.
+    Future {
+        /// By how much, in milliseconds.
+        by_ms: u64,
+    },
+}
+
+impl fmt::Display for SourceAgeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unset => f.write_str("the source timestamp is unset"),
+            Self::ClockUnavailable => {
+                f.write_str("no clock in the source's time domain is available")
+            }
+            Self::Future { by_ms } => {
+                write!(f, "the source timestamp is {by_ms} ms in the future")
+            }
+        }
+    }
+}
+
+/// How far ahead of the source clock a stamp may be before it is refused.
+///
+/// Publishers and clock samples race, so a stamp a little ahead of the newest
+/// clock reading is ordinary. A stamp far ahead is a clock that reset, a
+/// simulation that restarted, or a domain mismatch, and none of those may be
+/// read as a very fresh observation.
+pub const FUTURE_STAMP_TOLERANCE_MS: u64 = 500;
+
+/// How old an observation is, conservatively, in milliseconds.
+///
+/// # The two ages, and why the larger one wins
+///
+/// `receipt_age_ms` is how long *this process* has held the message. It is
+/// measured on the host's monotonic clock and it is always trustworthy, but it
+/// answers the wrong question: a retained sample published an hour ago and
+/// delivered to a new subscriber a moment ago has a receipt age of a few
+/// milliseconds and a real age of an hour. That gap is the defect this function
+/// exists to close.
+///
+/// The source age answers the right question but only when a clock in the
+/// stamp's own domain is available.
+///
+/// Both are lower bounds on how stale the reading actually is, so the larger is
+/// the honest answer. This is not a heuristic blend: it is the maximum of two
+/// quantities each computed inside one domain, and neither is ever subtracted
+/// from the other.
+pub fn observation_age_ms(
+    stamp: SourceTime,
+    clock: SourceClock,
+    receipt_age_ms: u64,
+) -> Result<u64, SourceAgeError> {
+    if stamp.is_unset() {
+        return Err(SourceAgeError::Unset);
+    }
+    let SourceClock::Established(now) = clock else {
+        return Err(SourceAgeError::ClockUnavailable);
+    };
+
+    let delta_ns = now.nanos() - stamp.nanos();
+    if delta_ns < 0 {
+        let ahead_ms = ((-delta_ns) / 1_000_000) as u64;
+        if ahead_ms > FUTURE_STAMP_TOLERANCE_MS {
+            return Err(SourceAgeError::Future { by_ms: ahead_ms });
+        }
+        // Inside the tolerance: an ordinary race between a publisher and a
+        // clock sample. Treated as zero source age, never as negative.
+        return Ok(receipt_age_ms);
+    }
+
+    let source_age_ms = (delta_ns / 1_000_000).min(u64::MAX as i128) as u64;
+    Ok(source_age_ms.max(receipt_age_ms))
+}
+
 /// Where the robot was, and how long ago it was there.
 ///
 /// Every field is an integer in Kern's units. No float reaches this type, which
@@ -286,6 +439,12 @@ pub enum ObservationUnavailable {
     /// NaN, an infinity, or a magnitude outside the representable range. The
     /// reading is discarded rather than repaired.
     Unrepresentable(ConversionError),
+    /// A reading arrived but its age could not be established.
+    ///
+    /// Refused rather than reported with the only age the host could compute,
+    /// because that age would be the time since delivery — which for a retained
+    /// sample is not the age of the observation.
+    SourceTimeUnusable(SourceAgeError),
     /// The host chose not to observe.
     ///
     /// A deployment that supplies no observation at all is a supported
@@ -308,6 +467,9 @@ impl fmt::Display for ObservationUnavailable {
             ),
             Self::SourceUnavailable => f.write_str("the observation source is unreachable"),
             Self::Unrepresentable(error) => write!(f, "the reading was unusable: {error}"),
+            Self::SourceTimeUnusable(error) => {
+                write!(f, "the reading's age could not be established: {error}")
+            }
             Self::NotObserved => f.write_str("this host supplies no position observation"),
         }
     }
@@ -365,6 +527,14 @@ pub struct ObservationSnapshot {
     pub pose: Option<PoseObservation>,
     /// The failure from the most recent message, when it could not be used.
     pub last_error: Option<ConversionError>,
+    /// Why the most recent reading's age could not be established, if it could
+    /// not be.
+    ///
+    /// Distinct from `last_error`: the message decoded perfectly well, and it
+    /// is only how old it is that is unknown. That is still disqualifying — an
+    /// observation of unknown age is not a fresh observation — but it sends a
+    /// reader somewhere different.
+    pub age_error: Option<SourceAgeError>,
     /// Whether any publisher for the topic has been discovered.
     pub publisher_seen: bool,
     /// Whether the observation source is still running.
@@ -377,6 +547,7 @@ impl ObservationSnapshot {
         Self {
             pose: None,
             last_error: None,
+            age_error: None,
             publisher_seen: false,
             source_alive: true,
         }
@@ -392,6 +563,7 @@ impl ObservationSnapshot {
 /// a reading, within bound   -> Known
 /// a reading, too old        -> Stale
 /// no reading, last was bad  -> Unrepresentable
+/// no reading, age unknown   -> SourceTimeUnusable
 /// no reading, no publisher  -> SourceUndiscovered
 /// no reading, publisher up  -> NotYetReceived
 /// ```
@@ -417,6 +589,12 @@ pub fn resolve(
         return WorldObservation::unavailable(
             device,
             ObservationUnavailable::Unrepresentable(error),
+        );
+    }
+    if let Some(error) = snapshot.age_error {
+        return WorldObservation::unavailable(
+            device,
+            ObservationUnavailable::SourceTimeUnusable(error),
         );
     }
     let reason = if snapshot.publisher_seen {

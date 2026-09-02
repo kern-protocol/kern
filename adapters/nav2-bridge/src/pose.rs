@@ -36,24 +36,47 @@
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::sync_channel;
+use std::sync::mpsc::{sync_channel, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::future::FutureExt;
 use futures::stream::StreamExt;
 use r2r::geometry_msgs::msg::PoseWithCovarianceStamped;
+use r2r::rosgraph_msgs::msg::Clock as ClockMsg;
 use r2r::{Context, Node, QosProfile};
 
 use kern_ai::observation::{
-    meters_to_millimeters, quaternion_yaw_radians, radians_to_millidegrees, resolve,
-    ConversionError, ObservationSnapshot, PoseObservation, WorldObservation,
+    meters_to_millimeters, observation_age_ms, quaternion_yaw_radians, radians_to_millidegrees,
+    resolve, ConversionError, ObservationSnapshot, PoseObservation, SourceAgeError, SourceClock,
+    SourceTime, WorldObservation,
 };
 use kern_core::DeviceId;
 
 /// One spin slice for the observer thread.
 const SPIN_SLICE: Duration = Duration::from_millis(20);
+
+/// The topic simulated time arrives on.
+pub const DEFAULT_CLOCK_TOPIC: &str = "/clock";
+
+/// How stale a `/clock` sample may be, in host time, before the simulated clock
+/// is treated as unavailable.
+///
+/// A running simulator publishes `/clock` continuously. One that has been
+/// paused stops, and after this long the host can no longer say what the
+/// simulated time is — which is the honest position, and the reason a paused
+/// simulator produces `UNKNOWN` rather than a confidently-aged observation.
+const CLOCK_SAMPLE_MAX_AGE: Duration = Duration::from_millis(2_000);
+
+/// How far a stamp may sit from wall-clock time and still be treated as
+/// wall-clock.
+///
+/// Used only when nothing has ever published `/clock`, which means the stack is
+/// not on simulated time. A simulated stamp is billions of seconds away from
+/// wall time, so this separates the two domains with an enormous margin rather
+/// than a fine judgement.
+const WALL_CLOCK_TOLERANCE: Duration = Duration::from_secs(60 * 60 * 24 * 30);
 
 /// How often to ask the graph whether anyone publishes the topic.
 const GRAPH_CHECK_INTERVAL: Duration = Duration::from_millis(250);
@@ -97,6 +120,8 @@ pub enum PoseObserverError {
     Ros(String),
     /// The thread did not report readiness inside [`STARTUP_TIMEOUT`].
     Timeout,
+    /// The thread stopped before it finished starting up.
+    Died,
 }
 
 impl std::fmt::Display for PoseObserverError {
@@ -105,6 +130,7 @@ impl std::fmt::Display for PoseObserverError {
             Self::Spawn(error) => write!(f, "observer thread: {error}"),
             Self::Ros(detail) => write!(f, "ROS: {detail}"),
             Self::Timeout => f.write_str("the observer did not start in time"),
+            Self::Died => f.write_str("the observer stopped while starting up"),
         }
     }
 }
@@ -122,6 +148,8 @@ pub struct PoseObserverConfig {
     pub topic: String,
     /// The oldest reading the host will plan on.
     pub max_age_ms: u64,
+    /// The topic carrying simulated time, when the stack uses it.
+    pub clock_topic: String,
 }
 
 impl Default for PoseObserverConfig {
@@ -131,6 +159,7 @@ impl Default for PoseObserverConfig {
             namespace: String::new(),
             topic: String::from(DEFAULT_POSE_TOPIC),
             max_age_ms: DEFAULT_MAX_AGE_MS,
+            clock_topic: String::from(DEFAULT_CLOCK_TOPIC),
         }
     }
 }
@@ -146,7 +175,15 @@ impl Default for PoseObserverConfig {
 #[derive(Clone, Copy, Debug)]
 struct Reading {
     pose: PoseObservation,
+    /// When this process first received *this* source observation.
+    ///
+    /// First, not most recent. The same sample can be delivered twice — once
+    /// per subscription — and a second delivery is not a second observation, so
+    /// it must not make the reading younger.
     received: Instant,
+    /// The stamp the publisher wrote, which is what identifies the observation
+    /// and orders it against others.
+    stamp: SourceTime,
 }
 
 /// State shared between the observer thread and its readers.
@@ -162,6 +199,16 @@ struct Shared {
     last_error: Mutex<Option<ConversionError>>,
     /// False once the observer thread has stopped, for any reason.
     alive: AtomicBool,
+    /// The newest `/clock` sample, and when this host received it.
+    ///
+    /// This is the only way to obtain a time in the same domain as a message
+    /// stamp under simulated time. It is deliberately not extrapolated: a
+    /// paused simulator stops publishing, and inventing elapsed simulated time
+    /// from host elapsed time would be exactly the cross-domain arithmetic this
+    /// whole mechanism exists to avoid.
+    ros_clock: Mutex<Option<(SourceTime, Instant)>>,
+    /// Why the newest reading's age could not be established, if it could not.
+    age_error: Mutex<Option<SourceAgeError>>,
     /// True once any publisher for the topic has been seen on the graph.
     ///
     /// Latching rather than instantaneous: a publisher that appeared and went
@@ -202,6 +249,8 @@ impl PoseObserver {
         let shared = Arc::new(Shared {
             latest: Mutex::new(None),
             last_error: Mutex::new(None),
+            ros_clock: Mutex::new(None),
+            age_error: Mutex::new(None),
             alive: AtomicBool::new(true),
             publisher_seen: AtomicBool::new(false),
         });
@@ -220,7 +269,7 @@ impl PoseObserver {
                 // a stale reading looking live: the thread is marked dead and
                 // every later observation says the source is unavailable.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let (mut node, latched, live) = match Context::create()
+                    let (mut node, latched, live, clock) = match Context::create()
                         .and_then(|context| {
                             Node::create(context, &config.node_name, &config.namespace)
                         })
@@ -257,7 +306,18 @@ impl PoseObserver {
                                 &config.topic,
                                 QosProfile::default(),
                             )?;
-                            Ok((node, latched, live))
+                            // The only source of a time in the same domain as
+                            // the pose stamps. Under `use_sim_time` every node
+                            // in the graph reads its clock from here, so this
+                            // is the domain by definition rather than by
+                            // assumption. When nothing publishes it, the stack
+                            // is on wall-clock time and the fallback in
+                            // `source_clock` applies.
+                            let clock = node.subscribe::<ClockMsg>(
+                                &config.clock_topic,
+                                QosProfile::default(),
+                            )?;
+                            Ok((node, latched, live, clock))
                         }) {
                         Ok(parts) => {
                             let _ = ready_tx.send(Ok(()));
@@ -272,6 +332,7 @@ impl PoseObserver {
                         &mut node,
                         Box::pin(latched),
                         Box::pin(live),
+                        Box::pin(clock),
                         &config.topic,
                         &thread_shared,
                         &thread_stop,
@@ -292,7 +353,15 @@ impl PoseObserver {
                 let _ = worker.join();
                 Err(PoseObserverError::Ros(detail))
             }
-            Err(_) => {
+            // The sender was dropped without a report, which means the
+            // observer thread unwound before it finished setting up. Reporting
+            // that as a timeout would send a reader looking for a slow network
+            // when the thread is already dead.
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = worker.join();
+                Err(PoseObserverError::Died)
+            }
+            Err(RecvTimeoutError::Timeout) => {
                 stop.store(true, Ordering::SeqCst);
                 let _ = worker.join();
                 Err(PoseObserverError::Timeout)
@@ -315,22 +384,82 @@ impl PoseObserver {
     /// somebody wants to know.
     fn snapshot(&self) -> ObservationSnapshot {
         let reading = self.shared.latest.lock().ok().and_then(|guard| *guard);
-        let pose = reading.map(|reading| {
-            // Saturating: a monotonic clock cannot run backwards, but a wrong
-            // answer here must not be a panic on a planning path.
-            let age_ms = reading.received.elapsed().as_millis().min(u64::MAX as u128) as u64;
-            PoseObservation::new(
-                reading.pose.x_mm(),
-                reading.pose.y_mm(),
-                reading.pose.yaw_mdeg(),
-                age_ms,
-            )
+        let clock = self.source_clock(reading.map(|reading| reading.stamp));
+
+        let mut age_error = None;
+        let pose = reading.and_then(|reading| {
+            // Receipt age: host monotonic, always available, and a lower bound
+            // on staleness. Saturating because a wrong answer here must not be
+            // a panic on a planning path.
+            let receipt_age_ms =
+                reading.received.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            match observation_age_ms(reading.stamp, clock, receipt_age_ms) {
+                Ok(age_ms) => Some(PoseObservation::new(
+                    reading.pose.x_mm(),
+                    reading.pose.y_mm(),
+                    reading.pose.yaw_mdeg(),
+                    age_ms,
+                )),
+                Err(error) => {
+                    // A reading whose age cannot be established is not a fresh
+                    // reading, and is not offered as one. The coordinates are
+                    // dropped with it.
+                    age_error = Some(error);
+                    None
+                }
+            }
         });
+
         ObservationSnapshot {
             pose,
             last_error: self.shared.last_error.lock().ok().and_then(|guard| *guard),
+            age_error: age_error
+                .or_else(|| self.shared.age_error.lock().ok().and_then(|guard| *guard)),
             publisher_seen: self.shared.publisher_seen.load(Ordering::SeqCst),
             source_alive: self.shared.alive.load(Ordering::SeqCst),
+        }
+    }
+
+    /// A current time in the same domain `stamp` was written in, if one exists.
+    ///
+    /// Two domains are recognised, and never mixed:
+    ///
+    /// - **Simulated.** Something publishes `/clock`. That value *is* the
+    ///   domain every node in the graph stamps in, so it is used directly and
+    ///   never extrapolated with host elapsed time. A sample older than
+    ///   [`CLOCK_SAMPLE_MAX_AGE`] means the simulator stopped publishing —
+    ///   paused, most likely — and the simulated present is then unknown.
+    /// - **Wall clock.** Nothing has ever published `/clock`, so the stack runs
+    ///   on real time and message stamps are epoch-based. The host's own wall
+    ///   clock is then the same domain, subject to a sanity check that the
+    ///   stamp is anywhere near it.
+    ///
+    /// Anything else is [`SourceClock::Unavailable`], which costs an
+    /// observation and never produces a wrong age.
+    fn source_clock(&self, stamp: Option<SourceTime>) -> SourceClock {
+        let sample = self.shared.ros_clock.lock().ok().and_then(|guard| *guard);
+        if let Some((simulated, received)) = sample {
+            return if received.elapsed() <= CLOCK_SAMPLE_MAX_AGE {
+                SourceClock::Established(simulated)
+            } else {
+                SourceClock::Unavailable
+            };
+        }
+
+        // Nothing has ever published `/clock`. Wall-clock domain, if the stamp
+        // is plausibly in it.
+        let Some(stamp) = stamp else {
+            return SourceClock::Unavailable;
+        };
+        let Ok(epoch) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return SourceClock::Unavailable;
+        };
+        let wall = SourceTime::from_nanos(epoch.as_nanos() as i128);
+        let distance = (wall.nanos() - stamp.nanos()).unsigned_abs();
+        if distance <= WALL_CLOCK_TOLERANCE.as_nanos() {
+            SourceClock::Established(wall)
+        } else {
+            SourceClock::Unavailable
         }
     }
 
@@ -371,6 +500,8 @@ impl PoseObserver {
             if Instant::now() >= until {
                 return if snapshot.pose.is_some() {
                     ObservationReadiness::OnlyStale
+                } else if snapshot.age_error.is_some() {
+                    ObservationReadiness::OnlyUndatable
                 } else if snapshot.last_error.is_some() {
                     ObservationReadiness::OnlyUnusable
                 } else if snapshot.publisher_seen {
@@ -400,6 +531,8 @@ pub enum ObservationReadiness {
     PublisherSilent,
     /// Readings arrived and none could be represented in Kern's units.
     OnlyUnusable,
+    /// Readings arrived and none could be dated, so none can be called fresh.
+    OnlyUndatable,
     /// A reading arrived but is older than the freshness bound.
     OnlyStale,
     /// The observer stopped while waiting.
@@ -413,6 +546,7 @@ impl std::fmt::Display for ObservationReadiness {
             Self::NoPublisher => "no publisher for the pose topic was discovered",
             Self::PublisherSilent => "a publisher exists but sent no pose in time",
             Self::OnlyUnusable => "every pose received was unusable",
+            Self::OnlyUndatable => "a pose was received but its age could not be established",
             Self::OnlyStale => "the only pose available is older than the freshness bound",
             Self::SourceStopped => "the observer stopped",
         })
@@ -433,6 +567,7 @@ fn run(
     node: &mut Node,
     mut latched: Pin<Box<impl futures::Stream<Item = PoseWithCovarianceStamped> + ?Sized>>,
     mut live: Pin<Box<impl futures::Stream<Item = PoseWithCovarianceStamped> + ?Sized>>,
+    mut clock: Pin<Box<impl futures::Stream<Item = ClockMsg> + ?Sized>>,
     topic: &str,
     shared: &Arc<Shared>,
     stop: &Arc<AtomicBool>,
@@ -455,13 +590,31 @@ fn run(
             last_graph_check = Instant::now();
         }
 
-        // Drain both, keeping only the newest: a planner wants the current
-        // position, not a history. One stream ending means its subscription is
-        // gone; the other may still deliver, so it is not fatal on its own.
+        // Simulated time first, so a pose read in the same slice is aged
+        // against the freshest clock sample available.
+        drain_clock(&mut clock, shared);
+
+        // Drain both pose subscriptions, keeping the newest source observation:
+        // a planner wants the current position, not a history. One stream
+        // ending means its subscription is gone; the other may still deliver,
+        // so it is not fatal on its own.
         let latched_open = drain(&mut latched, shared);
         let live_open = drain(&mut live, shared);
         if !latched_open && !live_open {
             return;
+        }
+    }
+}
+
+/// Reads whatever simulated-time samples have arrived.
+fn drain_clock(
+    subscription: &mut Pin<Box<impl futures::Stream<Item = ClockMsg> + ?Sized>>,
+    shared: &Arc<Shared>,
+) {
+    loop {
+        match subscription.next().now_or_never() {
+            Some(Some(message)) => apply_clock(shared, &message),
+            Some(None) | None => return,
         }
     }
 }
@@ -487,15 +640,38 @@ fn drain(
 
 /// Converts one message and records the outcome.
 fn apply(shared: &Arc<Shared>, message: &PoseWithCovarianceStamped) {
+    let stamp = SourceTime::from_ros(message.header.stamp.sec, message.header.stamp.nanosec);
     match convert(message) {
         Ok(pose) => {
             if let Ok(mut latest) = shared.latest.lock() {
-                *latest = Some(Reading {
-                    pose,
-                    received: Instant::now(),
-                });
+                let replace = match latest.as_ref() {
+                    // Nothing stored: anything is an improvement.
+                    None => true,
+                    // The same source observation, delivered a second time —
+                    // which is routine here, since the transient-local and
+                    // volatile subscriptions both carry it. It is one
+                    // observation, so the stored receipt instant stays as it
+                    // was. Refreshing it would make an old reading younger for
+                    // no reason other than that DDS delivered it twice.
+                    Some(stored) if stored.stamp == stamp => false,
+                    // Strictly newer wins; strictly older is discarded. DDS
+                    // does not promise ordered delivery across two
+                    // subscriptions, so an older sample arriving after a newer
+                    // one is expected, and must never overwrite it.
+                    Some(stored) => stamp > stored.stamp,
+                };
+                if replace {
+                    *latest = Some(Reading {
+                        pose,
+                        received: Instant::now(),
+                        stamp,
+                    });
+                }
             }
             if let Ok(mut error) = shared.last_error.lock() {
+                *error = None;
+            }
+            if let Ok(mut error) = shared.age_error.lock() {
                 *error = None;
             }
         }
@@ -507,6 +683,17 @@ fn apply(shared: &Arc<Shared>, message: &PoseWithCovarianceStamped) {
                 *last = Some(error);
             }
         }
+    }
+}
+
+/// Records the newest simulated-time sample.
+fn apply_clock(shared: &Arc<Shared>, message: &ClockMsg) {
+    let now = SourceTime::from_ros(message.clock.sec, message.clock.nanosec);
+    if let Ok(mut clock) = shared.ros_clock.lock() {
+        // Monotonic in the simulated domain: a simulator that restarts jumps
+        // backwards, and the newest sample is then the correct one to hold, so
+        // this deliberately takes whatever arrived last rather than the maximum.
+        *clock = Some((now, Instant::now()));
     }
 }
 
